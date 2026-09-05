@@ -7,3 +7,8 @@ data/
 uploads/
 *.db
 
+# graphify knowledge graph output
+graphify-out/
+
+# evaluation artifacts
+eval/results/
