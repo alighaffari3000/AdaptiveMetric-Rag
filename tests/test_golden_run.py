@@ -24,10 +24,16 @@ pytestmark = pytest.mark.eval
 
 
 @pytest.fixture(scope="module")
-def report():
+def report(tmp_path_factory):
     data_dir = use_scratch_data_dir()
+    from app import database
+
+    # DATA_DIR is read when app.database is first imported, which other test
+    # modules may already have done; point this run at its own file explicitly.
+    original_path = database.DB_PATH
+    database.DB_PATH = tmp_path_factory.mktemp("golden") / "golden.db"
+    database.close_thread_connection()
     try:
-        from app import database
         from app.main import load_settings
 
         database.init_db()
@@ -39,6 +45,8 @@ def report():
         outcomes = asyncio.run(run_cases(cases, settings))
         yield aggregate(outcomes)
     finally:
+        database.close_thread_connection()
+        database.DB_PATH = original_path
         cleanup(data_dir)
 
 

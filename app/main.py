@@ -20,6 +20,7 @@ from . import database
 from .documents import ALLOWED, content_digest, find_duplicate, ingest
 from .embeddings import embedding_info, reindex_all
 from .index import index as chunk_index
+from .net import ProviderError, redact
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence
@@ -139,7 +140,8 @@ async def health():
 @app.get("/api/system/info")
 async def system_info():
     info = embedding_info(load_settings())
-    snapshot = chunk_index.snapshot()
+    # A cold index reloads from the database here; keep that off the event loop.
+    snapshot = await asyncio.to_thread(chunk_index.snapshot)
     if snapshot.size:
         info["dimensions"] = int(snapshot.matrix.shape[1])
     return {"embedding": info, "index": {"chunks": snapshot.size, "stale_vectors": snapshot.stale_vectors}}
@@ -171,8 +173,8 @@ async def save_settings(settings: AppSettings):
     if embedding_changed:
         try:
             await reindex_all(settings)
-        except (httpx.HTTPError, KeyError, ValueError) as exc:
-            raise HTTPException(502, f"Embedding reindex failed; settings were not changed: {exc}") from exc
+        except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
+            raise HTTPException(502, f"Embedding reindex failed; settings were not changed: {redact(exc)}") from exc
     database.execute("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (database.json_value(settings.model_dump()),))
     payload = settings.model_dump()
     payload.update(api_key="", has_api_key=bool(settings.api_key),
@@ -204,7 +206,7 @@ async def test_provider():
             raise ValueError("API key is missing")
         return {"ok": True, "message": f"{settings.provider.title()} configuration is ready."}
     except Exception as exc:
-        raise HTTPException(400, f"Connection failed: {exc}") from exc
+        raise HTTPException(400, f"Connection failed: {redact(exc)}") from exc
 
 
 @app.get("/api/embeddings/ollama-models")
@@ -267,7 +269,7 @@ async def upload_document(file: UploadFile = File(...)):
         return await ingest(file.filename or "document", file.content_type or "", payload,
                             settings.chunk_size, settings.chunk_overlap, settings)
     except Exception as exc:
-        raise HTTPException(400, f"Could not process document: {exc}") from exc
+        raise HTTPException(400, f"Could not process document: {redact(exc)}") from exc
 
 
 @app.delete("/api/documents/{document_id}")
@@ -298,19 +300,19 @@ async def chat(request: ChatRequest):
     settings = load_settings()
     try:
         result = await search(settings, request.message, request.filters)
-    except (httpx.HTTPError, KeyError, ValueError) as exc:
-        raise HTTPException(502, f"Retrieval failed: {exc}") from exc
+    except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
+        raise HTTPException(502, f"Retrieval failed: {redact(exc)}") from exc
 
     evidence_found = result.evidence_found
     grounded_chunks = result.chunks
     if evidence_found:
         try:
             answer = await generate(settings, request.message, grounded_chunks, result.analysis.language)
-        except (httpx.HTTPError, KeyError, ValueError) as first_exc:
+        except (httpx.HTTPError, ProviderError, KeyError, ValueError) as first_exc:
             logger.warning("Generation failed; retrying with reduced context: %r", first_exc, exc_info=True)
             try:
                 answer = await generate(settings, request.message, grounded_chunks[:2], result.analysis.language)
-            except (httpx.HTTPError, KeyError, ValueError) as retry_exc:
+            except (httpx.HTTPError, ProviderError, KeyError, ValueError) as retry_exc:
                 logger.error("Generation retry failed; using grounded extractive fallback: %r", retry_exc, exc_info=True)
                 answer = local_answer(request.message, grounded_chunks, result.analysis.language)
     else:

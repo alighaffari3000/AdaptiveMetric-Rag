@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +22,11 @@ DIMENSION = 384
 STANDOUT_REFERENCE = 4.0
 EARLY_EXIT_STANDOUT = 3.6
 EARLY_EXIT_MARGIN = .04
+# Under rank fusion a chunk is cited when its raw similarity sits within this
+# many standard deviations of the best chunk's. Swept on the golden set: 1.5
+# roughly doubles citation precision over citing every returned chunk while
+# keeping 98 percent of the relevant ones (eval/BASELINE.md).
+CITATION_STANDOUT_GAP = 1.5
 
 PERSIAN_STOP = {"از", "به", "در", "با", "برای", "که", "این", "آن", "را", "و", "یا", "چه", "چرا", "چگونه", "است", "شد", "می"}
 ENGLISH_STOP = {"the", "a", "an", "of", "to", "in", "for", "is", "was", "and", "or", "what", "why", "how", "does"}
@@ -170,21 +173,6 @@ def analyze_query(query: str) -> QueryAnalysis:
                          temporal_terms=temporal, keywords=keywords, query_tokens=query_tokens)
 
 
-def _bm25(query_tokens: list[str], doc_tokens: list[str], avg_len: float, doc_freq: Counter[str], total: int) -> float:
-    if not query_tokens or not doc_tokens:
-        return 0.0
-    counts = Counter(doc_tokens)
-    score = 0.0
-    for term in set(query_tokens):
-        tf = counts[term]
-        if not tf:
-            continue
-        idf = math.log(1 + (total - doc_freq[term] + .5) / (doc_freq[term] + .5))
-        denom = tf + 1.5 * (1 - .75 + .75 * len(doc_tokens) / max(avg_len, 1))
-        score += idf * (tf * 2.5 / denom)
-    return score
-
-
 def _overlap(needles: list[str], haystack: str) -> float:
     if not needles:
         return 0.0
@@ -245,7 +233,13 @@ def _weighted_rrf(signals: dict[str, np.ndarray], weights: dict[str, float], k: 
         if ranked.size == size and np.ptp(values[ranked]) == 0:
             continue  # every candidate scores the same: no ordering to contribute
         order = ranked[np.argsort(-values[ranked], kind="stable")]
-        fused[order] += weight / (k + np.arange(1, order.size + 1))
+        # Equal values share a rank. Numbering ties 1, 2, 3 in corpus order
+        # would let insertion order decide between chunks a signal cannot
+        # tell apart, which is exactly what sparse signals like entity or
+        # numeric produce: many chunks at 1.0, the rest at 0.
+        _, first_index, inverse = np.unique(-values[order], return_index=True, return_inverse=True)
+        ranks = first_index[inverse] + 1
+        fused[order] += weight / (k + ranks)
         spent += weight
     if spent <= 0:
         # Nothing separated these candidates - a single candidate, or every
@@ -304,6 +298,7 @@ class RetrievalResult:
     confidence: float
     early_exit: bool
     standout: float = 0.0
+    fusion: str = "linear"
 
 
 def apply_semantic_profile(weights: dict[str, float], dense_weight: float) -> dict[str, float]:
@@ -390,11 +385,14 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     arrays = {name: np.asarray(values, dtype=np.float64) for name, values in signals.items()}
     fused = (_weighted_rrf(arrays, analysis.weights) if fusion == "rank"
              else _weighted_sum(arrays, analysis.weights))
-    # How far the best chunk stands above the corpus, in standard deviations.
+    # How far each chunk stands above the corpus, in standard deviations of the
+    # raw similarity; the best chunk's value is the result-level `standout`.
     pool = dense[universe]
-    standout = float((pool.max() - pool.mean()) / (pool.std() + 1e-9)) if pool.size > 1 else 0.0
+    pool_mean, pool_std = (float(pool.mean()), float(pool.std()) + 1e-9) if pool.size > 1 else (0.0, 1.0)
+    standout = float((pool.max() - pool_mean) / pool_std) if pool.size > 1 else 0.0
     for chunk, value in zip(scored, fused):
         chunk["score"] = round(float(value), 6)
+        chunk["standout"] = round((chunk["features"]["dense"] - pool_mean) / pool_std, 3) if pool.size > 1 else 0.0
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     selected = scored[:context_count]
@@ -402,7 +400,7 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     top = selected[0]["score"] if selected else 0.0
     second = selected[1]["score"] if len(selected) > 1 else 0.0
     early = standout > EARLY_EXIT_STANDOUT and top - second > EARLY_EXIT_MARGIN
-    return RetrievalResult(selected, analysis, round(confidence, 3), early, round(standout, 3))
+    return RetrievalResult(selected, analysis, round(confidence, 3), early, round(standout, 3), fusion)
 
 
 def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]]:
@@ -428,6 +426,14 @@ def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]
     )
     if not evidence_found:
         return False, []
-    citation_floor = max(.10, result.chunks[0]["score"] * .45)
-    grounded = [chunk for chunk in result.chunks if chunk["score"] >= citation_floor]
+    top = result.chunks[0]
+    if result.fusion == "rank" and top.get("rerank_score") is None:
+        # Fused rank scores sit near 1.0 for every returned chunk, so a
+        # fraction of the top score would cite all of them. Compare raw
+        # similarities instead, on a scale that does not depend on the model.
+        floor = top.get("standout", 0.0) - CITATION_STANDOUT_GAP
+        grounded = [chunk for chunk in result.chunks if chunk.get("standout", 0.0) >= floor]
+    else:
+        citation_floor = max(.10, top["score"] * .45)
+        grounded = [chunk for chunk in result.chunks if chunk["score"] >= citation_floor]
     return bool(grounded), grounded

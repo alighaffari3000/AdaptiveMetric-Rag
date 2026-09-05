@@ -87,7 +87,7 @@ async def search(settings: AppSettings, query: str, filters: dict[str, Any] | No
         confidence = score_confidence(chunks, result.analysis.query_tokens or result.analysis.keywords,
                                       result.standout)
 
-    gated = RetrievalResult(chunks, result.analysis, confidence, result.early_exit, result.standout)
+    gated = RetrievalResult(chunks, result.analysis, confidence, result.early_exit, result.standout, result.fusion)
     evidence_found, grounded = select_grounded(gated)
     return SearchResult(
         chunks=grounded,

@@ -6,7 +6,6 @@ keeps working when chunking, embeddings, or ranking change in later phases.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import math
@@ -292,7 +291,7 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
                     context_count: int = 10, cache: EmbeddingCache | None = None) -> list[CaseOutcome]:
     """Score the full pipeline: embed, fuse, rerank when enabled, and gate."""
     from app.embeddings import create_query_embedding, is_semantic
-    from app.rerank import RerankUnavailable, blend, rerank_scores
+    from app.rerank import blend, rerank_scores
     from app.retrieval import retrieve, score_confidence, select_grounded, RetrievalResult
 
     async def embed_query(question: str) -> list[float]:
@@ -300,7 +299,6 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
             return (await cache.embed(settings, [question], kind="query"))[0]
         return await create_query_embedding(settings, question)
 
-    scoring_settings = settings.model_copy(update={"context_count": context_count})
     semantic = is_semantic(settings)
     dense_weight = settings.semantic_dense_weight if semantic else None
     fusion = "rank" if semantic else "linear"
@@ -332,7 +330,8 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
                 ) from exc
         latency = (time.perf_counter() - started) * 1000
         ranked = ranked[:context_count]
-        gated = RetrievalResult(ranked, result.analysis, confidence, result.early_exit, result.standout)
+        gated = RetrievalResult(ranked, result.analysis, confidence, result.early_exit, result.standout,
+                                result.fusion)
         evidence_found, _ = select_grounded(gated)
         abstained = not evidence_found
         outcomes.append(

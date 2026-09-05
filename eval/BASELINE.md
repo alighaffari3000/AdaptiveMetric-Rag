@@ -19,7 +19,7 @@ python -m eval.bench_latency
 | Chunk size / overlap | 900 / 140 characters |
 | Ranked chunks scored | 10 |
 | Corpus | 13 documents, 31 chunks |
-| Golden cases | 89 (81 answerable, 8 abstain) |
+| Golden cases | 98 (90 answerable, 8 abstain) |
 
 ## Quality
 
@@ -314,3 +314,74 @@ identical metrics on this corpus: with 31 chunks the rank differences are small
 either way, and the ranking is driven by which signals vote rather than by fine
 rank positions. The constant would start to matter on a corpus large enough to
 produce long candidate lists.
+
+---
+
+# Review pass — defects found re-reading Phases 0 to 3
+
+Recorded 2026-09-06. A second read of everything above, with the eval harness
+used to check each suspicion rather than argue about it.
+
+## Citation precision had regressed under rank fusion
+
+Fused rank scores sit near 1.0 for every returned chunk, so the citation floor
+of "45 percent of the top score" stopped filtering anything: with a semantic
+embedding every one of the five returned chunks was cited, relevant or not.
+Measured on the golden set:
+
+| Configuration | Chunks cited (mean) | Citation precision |
+|---|---:|---:|
+| Feature hashing, weighted sum | 2.93 | 0.472 |
+| Semantic, rank fusion, before the fix | 5.00 | **0.222** |
+| Semantic, rank fusion, after the fix | 3.42 | **0.402** |
+
+The gate now compares raw similarities on a model-free scale: under rank
+fusion, a chunk is cited when its standout (standard deviations above the corpus
+mean) is within `CITATION_STANDOUT_GAP` of the best chunk's. The gap was swept:
+
+| Gap | Cited | Precision | At least one relevant cited | Relevant kept |
+|---:|---:|---:|---:|---:|
+| 0.5 | 1.93 | 0.608 | 0.856 | 0.855 |
+| 1.0 | 2.69 | 0.482 | 0.900 | 0.930 |
+| **1.5** | 3.39 | 0.401 | 0.944 | 0.983 |
+| 2.0 | 3.88 | 0.349 | 0.956 | 0.994 |
+| none | 5.00 | 0.222 | 0.956 | 1.000 |
+
+1.5 keeps 98 percent of relevant chunks and nearly doubles precision. Tighter
+gaps trade relevant citations for cleaner lists, which is the wrong direction
+for a system whose value is showing its evidence. When a reranker has run, its
+blended score has a meaningful scale and the original floor applies.
+
+## Rank fusion broke ties by insertion order
+
+Tied values were numbered 1, 2, 3 in corpus order, so among chunks a signal
+could not tell apart, the one inserted first scored higher. Sparse signals
+produce exactly that pattern: many chunks at 1.0 on `entity` or `numeric`, the
+rest at 0. Ties now share the best rank in their group. No golden-set metric
+moved, which is expected: ties rarely decide the top of a list led by a dense
+signal, but the ordering is now determined by the data rather than by the order
+documents happened to be uploaded.
+
+## API keys were still reaching logs and clients on three paths
+
+Phase 3 redacted keys in the reranking path only. The answer path
+(`providers.generate`), every embedding request, and three HTTP error details
+returned to the browser still used httpx's own error text, which embeds the
+request URL, and for Gemini that URL carries the key. Every provider response
+now goes through one redacting check, and every client-facing error detail is
+redacted. Redaction also covers keys in prose and bearer tokens, in case a
+provider echoes them in a body.
+
+## Smaller corrections
+
+- A fresh database was created with the pre-migration schema and then
+  immediately rebuilt into the current one. It is now created current, and the
+  migration runs only for databases that actually predate it.
+- `/api/system/info` could trigger an index reload on the event loop thread.
+- The generation path had no retry; transient failures and rate limits now get
+  the same backoff as embeddings and reranking.
+- The golden set has 98 cases, not the 89 stated above; the counts are corrected.
+- Dead code from before the index (`_bm25`, unused imports) is removed.
+
+Quality after the review pass is unchanged on every metric for both
+configurations. Latency at 20,000 chunks stays under 20 ms.

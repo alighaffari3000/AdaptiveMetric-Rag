@@ -22,13 +22,45 @@ RETRY_BASE_DELAY = 0.75
 RETRY_MAX_DELAY = 30.0
 RETRYABLE_STATUS = {408, 425, 429, 500, 502, 503, 504}
 
-_SECRET_IN_URL = re.compile(r"([?&](?:key|api_key|access_token)=)[^&\s'\"]+", re.IGNORECASE)
+_SECRET_PATTERNS = (
+    # key=..., api_key=..., token=... in a URL query string or anywhere in prose;
+    # the lookbehind keeps "monkey=banana" out of it.
+    re.compile(r"((?:^|(?<=[?&\s'\"(,;]))(?:key|api_key|apikey|access_token|token)=)[^&\s'\")]+", re.IGNORECASE),
+    # Authorization: Bearer <token>
+    re.compile(r"(bearer\s+)[A-Za-z0-9._\-]+", re.IGNORECASE),
+)
 
 
 def redact(text: object) -> str:
-    """Gemini passes the API key as a query parameter, so httpx puts it into the
-    URL of every error it raises, and those errors reach logs and API responses."""
-    return _SECRET_IN_URL.sub(r"\1***", str(text))
+    """Strip credentials from text that is about to be logged or returned.
+
+    Gemini passes the API key as a query parameter, so httpx puts it into the
+    URL of every error it raises, and those errors reach logs and API responses.
+    Bodies and headers are covered too, in case a provider echoes them.
+    """
+    cleaned = str(text)
+    for pattern in _SECRET_PATTERNS:
+        cleaned = pattern.sub(r"\1***", cleaned)
+    return cleaned
+
+
+class ProviderError(RuntimeError):
+    """A provider call failed. The message never carries an API key."""
+
+    def __init__(self, message: str):
+        super().__init__(redact(message))
+
+
+def ensure_success(response: httpx.Response, what: str) -> None:
+    """Replace `response.raise_for_status()` on provider calls.
+
+    httpx puts the request URL into its error text, and for Gemini that URL
+    carries the API key as a query parameter.
+    """
+    if response.is_success:
+        return
+    detail = response.text[:300] if response.text else ""
+    raise ProviderError(f"{what} failed with HTTP {response.status_code}: {detail}")
 
 
 def _retry_after(response: httpx.Response | None) -> float | None:

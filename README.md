@@ -155,7 +155,7 @@ python -m eval.bench_latency               # latency at 1k / 5k / 20k chunks
 pytest -m eval                             # the same run as a test
 ```
 
-`eval/` holds a 13-document Persian and English corpus and 89 labelled questions
+`eval/` holds a 13-document Persian and English corpus and 98 labelled questions
 covering cross-lingual, multi-intent, follow-up, page-boundary and unanswerable
 cases. Recorded numbers for each change live in `eval/BASELINE.md`. See
 `eval/README.md` for the format and how to add cases.

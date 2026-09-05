@@ -1,5 +1,5 @@
 from app.documents import chunk_blocks
-from app.retrieval import analyze_query, best_evidence, cosine, embed, expanded_keywords, normalize_query, query_variants
+from app.retrieval import analyze_query, best_evidence, cosine, embed, normalize_query, query_variants
 
 
 def test_temporal_router_prioritizes_time():

@@ -114,6 +114,8 @@ def test_gemini_request_uses_retrieval_task_types_and_normalises(monkeypatch):
 
     class FakeResponse:
         status_code = 200
+        is_success = True
+        text = ""
 
         def __init__(self, payload):
             self._payload = payload
@@ -145,9 +147,8 @@ def test_gemini_request_uses_retrieval_task_types_and_normalises(monkeypatch):
 def test_gemini_rejects_a_short_response(monkeypatch):
     class FakeResponse:
         status_code = 200
-
-        def raise_for_status(self):
-            return None
+        is_success = True
+        text = ""
 
         def json(self):
             return {"embeddings": [{"values": [1.0]}]}

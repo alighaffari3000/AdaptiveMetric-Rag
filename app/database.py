@@ -85,6 +85,7 @@ def close_thread_connection() -> None:
     if conn is not None:
         conn.close()
         _local.conn = None
+    _local.depth = 0
 
 
 def _create_schema(db: sqlite3.Connection) -> None:
@@ -98,7 +99,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS chunks (
           id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
           position INTEGER NOT NULL, page INTEGER, section TEXT,
-          content TEXT NOT NULL, embedding TEXT NOT NULL, tokens TEXT NOT NULL,
+          content TEXT NOT NULL, vector BLOB NOT NULL, tokens TEXT NOT NULL,
           metadata TEXT NOT NULL DEFAULT '{}'
         );
         CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id);
@@ -120,9 +121,13 @@ def _create_schema(db: sqlite3.Connection) -> None:
 
 
 def _migrate_embeddings_to_blob(db: sqlite3.Connection) -> None:
-    """Schema v1: replace the JSON `embedding` column with a float32 `vector` BLOB."""
+    """Schema v1: replace the JSON `embedding` column with a float32 `vector` BLOB.
+
+    A database created by this version already has the BLOB column and is left
+    alone; only databases from before the migration are rebuilt.
+    """
     columns = {row["name"] for row in db.execute("PRAGMA table_info(chunks)")}
-    if "vector" in columns:
+    if "vector" in columns or "embedding" not in columns:
         return
     db.executescript(
         """

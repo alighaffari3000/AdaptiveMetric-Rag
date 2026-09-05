@@ -11,7 +11,7 @@ import httpx
 
 from . import database
 from .index import index
-from .net import post_with_retry
+from .net import ensure_success, post_with_retry
 from .models import AppSettings
 from .retrieval import DIMENSION, embed as local_embed, query_variants
 
@@ -141,10 +141,10 @@ async def _embed_ollama(settings: AppSettings, texts: list[str], client: httpx.A
             for text in batch:
                 legacy = await post_with_retry(client, f"{base_url}/api/embeddings",
                                                 json={"model": settings.embedding_model, "prompt": text})
-                legacy.raise_for_status()
+                ensure_success(legacy, "Ollama embedding")
                 vectors.append(_normalize(legacy.json()["embedding"]))
             continue
-        response.raise_for_status()
+        ensure_success(response, "Ollama embedding")
         payload = response.json()
         batch_vectors = payload.get("embeddings") or ([payload["embedding"]] if payload.get("embedding") else [])
         if len(batch_vectors) != len(batch):
@@ -167,7 +167,7 @@ async def _embed_openai(settings: AppSettings, texts: list[str], client: httpx.A
             headers={"Authorization": f"Bearer {api_key}"},
             json={"model": settings.embedding_model, "input": batch},
         )
-        response.raise_for_status()
+        ensure_success(response, "OpenAI embedding")
         data = response.json()["data"]
         if len(data) != len(batch):
             raise ValueError("The embedding endpoint returned an unexpected number of vectors")
@@ -198,7 +198,7 @@ async def _embed_gemini(settings: AppSettings, texts: list[str], kind: TextKind,
                 "outputDimensionality": GEMINI_DIMENSIONS,
             } for text in batch]},
         )
-        response.raise_for_status()
+        ensure_success(response, "Gemini embedding")
         embeddings = response.json()["embeddings"]
         if len(embeddings) != len(batch):
             raise ValueError("Gemini returned an unexpected number of embeddings")
@@ -215,8 +215,6 @@ async def create_embeddings(settings: AppSettings, texts: list[str],
     if provider == "local":
         return [local_embed(text) for text in texts]
     if provider == "sentence-transformers":
-        import asyncio
-
         return await asyncio.to_thread(_embed_sentence_transformers, settings, texts, kind)
 
     timeout = httpx.Timeout(180, connect=30)

@@ -7,24 +7,10 @@ from typing import Any
 import httpx
 
 from .models import AppSettings
-from .net import post_with_retry, redact
+from .net import ensure_success, post_with_retry
 
 
 logger = logging.getLogger("adaptive_metric_rag.providers")
-
-
-class ProviderError(RuntimeError):
-    """A provider call failed, with the API key stripped from the message."""
-
-    def __init__(self, message: str):
-        super().__init__(redact(message))
-
-
-def raise_for_status(response: httpx.Response, what: str) -> None:
-    if response.is_success:
-        return
-    detail = response.text[:300] if response.text else ""
-    raise ProviderError(f"{what} failed with HTTP {response.status_code}: {redact(detail)}")
 
 
 def _has_complete_ending(answer: str) -> bool:
@@ -149,25 +135,25 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
     async with httpx.AsyncClient(timeout=timeout) as client:
         if settings.provider == "ollama":
             base = (settings.base_url or "http://host.docker.internal:11434").rstrip("/")
-            response = await client.post(f"{base}/api/chat", json={
+            response = await post_with_retry(client, f"{base}/api/chat", what="Ollama generation", json={
                 "model": settings.model, "stream": False, "think": False,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "options": {"temperature": settings.temperature, "num_predict": settings.max_tokens},
             })
-            response.raise_for_status()
+            ensure_success(response, "generation")
             payload = response.json()
             answer = payload["message"]["content"]
             done_reason = payload.get("done_reason", "")
             logger.warning("Ollama generation finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason))
             if _wrong_language(language, answer):
-                repair = await client.post(f"{base}/api/chat", json={
+                repair = await post_with_retry(client, f"{base}/api/chat", what="Ollama repair", json={
                     "model": settings.model, "stream": False, "think": False,
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user},
                                  {"role": "assistant", "content": answer},
                                  {"role": "user", "content": _repair_instruction(language)}],
                     "options": {"temperature": min(settings.temperature, .2), "num_predict": settings.max_tokens},
                 })
-                repair.raise_for_status()
+                ensure_success(repair, "repair")
                 repaired_payload = repair.json()
                 answer = repaired_payload["message"]["content"]
                 done_reason = repaired_payload.get("done_reason", "")
@@ -175,14 +161,14 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             for attempt in range(2):
                 if not _looks_incomplete(question, answer, done_reason):
                     break
-                continuation = await client.post(f"{base}/api/chat", json={
+                continuation = await post_with_retry(client, f"{base}/api/chat", what="Ollama continuation", json={
                     "model": settings.model, "stream": False, "think": False,
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user},
                                  {"role": "assistant", "content": answer},
                                  {"role": "user", "content": _continuation_instruction(language)}],
                     "options": {"temperature": min(settings.temperature, .2), "num_predict": min(settings.max_tokens, 512)},
                 })
-                continuation.raise_for_status()
+                ensure_success(continuation, "continuation")
                 continuation_payload = continuation.json()
                 piece = continuation_payload["message"]["content"]
                 answer = _join_continuation(answer, piece)
@@ -191,42 +177,42 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             return _finalize_answer(answer)
         if settings.provider == "openai":
             base = (settings.base_url or "https://api.openai.com/v1").rstrip("/")
-            response = await client.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {settings.api_key}"}, json={
+            response = await post_with_retry(client, f"{base}/chat/completions", what="OpenAI generation", headers={"Authorization": f"Bearer {settings.api_key}"}, json={
                 "model": settings.model, "temperature": settings.temperature, "max_tokens": settings.max_tokens,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             })
-            response.raise_for_status()
+            ensure_success(response, "generation")
             payload = response.json()
             choice = payload["choices"][0]
             answer = choice["message"]["content"]
             if _looks_incomplete(question, answer, choice.get("finish_reason", "")) or _wrong_language(language, answer):
-                repair = await client.post(f"{base}/chat/completions", headers={"Authorization": f"Bearer {settings.api_key}"}, json={
+                repair = await post_with_retry(client, f"{base}/chat/completions", what="OpenAI repair", headers={"Authorization": f"Bearer {settings.api_key}"}, json={
                     "model": settings.model, "temperature": min(settings.temperature, .2), "max_tokens": settings.max_tokens,
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user},
                                  {"role": "assistant", "content": answer}, {"role": "user", "content": _repair_instruction(language)}],
                 })
-                repair.raise_for_status()
+                ensure_success(repair, "repair")
                 answer = repair.json()["choices"][0]["message"]["content"]
             return _finalize_answer(answer)
         if settings.provider == "gemini":
             base = (settings.base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
-            response = await client.post(f"{base}/models/{settings.model}:generateContent", params={"key": settings.api_key}, json={
+            response = await post_with_retry(client, f"{base}/models/{settings.model}:generateContent", what="Gemini generation", params={"key": settings.api_key}, json={
                 "system_instruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
                 "generationConfig": {"temperature": settings.temperature, "maxOutputTokens": settings.max_tokens},
             })
-            response.raise_for_status()
+            ensure_success(response, "generation")
             payload = response.json()
             candidate = payload["candidates"][0]
             answer = candidate["content"]["parts"][0]["text"]
             if _looks_incomplete(question, answer, candidate.get("finishReason", "")) or _wrong_language(language, answer):
                 repair_prompt = user + "\n\n" + _repair_instruction(language)
-                repair = await client.post(f"{base}/models/{settings.model}:generateContent", params={"key": settings.api_key}, json={
+                repair = await post_with_retry(client, f"{base}/models/{settings.model}:generateContent", what="Gemini repair", params={"key": settings.api_key}, json={
                     "system_instruction": {"parts": [{"text": system}]},
                     "contents": [{"role": "user", "parts": [{"text": repair_prompt}]}],
                     "generationConfig": {"temperature": min(settings.temperature, .2), "maxOutputTokens": settings.max_tokens},
                 })
-                repair.raise_for_status()
+                ensure_success(repair, "repair")
                 answer = repair.json()["candidates"][0]["content"]["parts"][0]["text"]
             return _finalize_answer(answer)
     raise ValueError(f"Unknown provider: {settings.provider}")
@@ -251,7 +237,7 @@ async def complete(settings: AppSettings, system: str, user: str, model: str = "
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "options": {"temperature": temperature, "num_predict": max_tokens},
             })
-            raise_for_status(response, "Ollama completion")
+            ensure_success(response, "Ollama completion")
             return response.json()["message"]["content"]
         if settings.provider == "openai":
             base = (settings.base_url or "https://api.openai.com/v1").rstrip("/")
@@ -263,7 +249,7 @@ async def complete(settings: AppSettings, system: str, user: str, model: str = "
                       "messages": [{"role": "system", "content": system},
                                    {"role": "user", "content": user}]},
             )
-            raise_for_status(response, "OpenAI completion")
+            ensure_success(response, "OpenAI completion")
             return response.json()["choices"][0]["message"]["content"]
         if settings.provider == "gemini":
             base = (settings.base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
@@ -275,7 +261,7 @@ async def complete(settings: AppSettings, system: str, user: str, model: str = "
                       "contents": [{"role": "user", "parts": [{"text": user}]}],
                       "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}},
             )
-            raise_for_status(response, f"Gemini completion with model '{model}'")
+            ensure_success(response, f"Gemini completion with model '{model}'")
             parts = response.json()["candidates"][0]["content"]["parts"]
             return "".join(part.get("text", "") for part in parts)
     raise ValueError(f"Provider {settings.provider} cannot run a plain completion")
