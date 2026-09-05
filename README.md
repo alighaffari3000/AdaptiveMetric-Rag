@@ -20,6 +20,12 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 - Multilingual multi-keyword expansion with blended query vectors for cross-language retrieval
 - Three-stage flow: fast candidate selection → adaptive scoring → grounded generation
 - Confidence scoring and early-exit signals
+- Server-sent streaming at `/api/chat/stream`: the sources appear before the model starts writing,
+  and repair happens after the stream rather than rewriting text already on screen
+- Every cited sentence is checked against the passage it cites, and the ones the passage does not
+  support are counted and marked rather than silently trusted
+- Optional structured citations: the model returns `{answer, claims}` and it is rendered back into
+  inline `[1]` markers, falling back to reading the markers out of prose
 - PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML ingestion, with headings kept as a section path
   and table rows serialised one per line
 - Persian PDFs read in the order they were written: mirrored pages are detected and repaired, and
@@ -153,6 +159,9 @@ API keys submitted through the interface are stored server-side and never return
 | Early exit | On | Marks decisive retrievals so expensive optional stages can be skipped |
 | Query expansion | On | Enables expansion behavior in confidence-aware extensions |
 | Query rewrite | On | Makes a follow-up question standalone from the conversation before retrieval |
+| Verify claims | On | Checks each cited sentence against the passage it cites |
+| Verify backend | lexical | `lexical` is offline and free; `llm` asks the answer model instead |
+| Structured citations | Off | Asks the model for `{answer, claims}` instead of inline markers only |
 | Multi-query | On | Retrieves the model's alternative phrasings too and merges them by rank |
 | History turns | 4 | Messages of the conversation the rewriter and the answer prompt may see |
 | Strict multi-part answers | Off | Treats a short answer to a two-part question as truncated and repairs it |

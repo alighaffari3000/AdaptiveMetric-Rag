@@ -601,3 +601,89 @@ the numbers a little and none of the conclusions.
   column, so a row survives chunking as a unit.
 - Citations carry a page range and the full section path, both of which exist
   only now that a chunk can span pages and knows its heading.
+
+---
+
+# Phase 6 — answer generation and citations
+
+Measured 2026-09-05. Retrieval metrics are untouched by this phase: nothing in
+it changes what is retrieved, only what is done with it.
+
+Reproduce with:
+
+```
+python -m eval.verify_claims
+pytest tests/test_answering.py
+```
+
+## Streaming
+
+`/api/chat/stream` sends server-sent events: `meta` (the analysis and
+confidence, as soon as retrieval is done), `delta` for each piece of the answer,
+`replace` when a finished answer had to be corrected, and `done` carrying the
+same payload `/api/chat` returns. Measured against a live server with the local
+provider, over three runs: sources at 59-96 ms, first token in the same
+millisecond, complete answer at 59-96 ms.
+
+That meets the phase's criterion - the first token under a second after
+retrieval - for the local provider, and only for it. With a hosted model the
+wait is that model's own time to first token, which cannot be measured here
+without a key. What this phase guarantees is that the wait is no longer spent
+in silence: the sources are on screen before the model has written anything.
+
+Repair still happens after the stream, never during it. A truncated answer
+cannot be recognised until it stops, and rewriting text a reader is already
+reading is worse than the truncation - so a continuation arrives as further
+deltas, and only a wrong-language answer, which is worth redoing, is replaced.
+
+## Abstention is a token, not a phrase
+
+`answer_abstained` matched a list of five phrases in two languages, so a model
+that phrased its refusal differently was recorded as having answered. The
+prompt now asks for `[[NO_ANSWER]]` exactly, and the list is kept only for
+conversations answered before the token existed. This does not change
+`abstain_accuracy` on the golden set, which measures the retrieval gate rather
+than the model - that number is still 0.125 and still the weakest in the suite.
+
+## Claim checking
+
+`python -m eval.verify_claims` scores the checker itself on the golden corpus,
+against two populations:
+
+| Population | Claims | Correct |
+|---|---:|---:|
+| supported (extractive answers, quoting the passage they cite) | 261 | **1.000** |
+| far negatives (re-cited to another document) | 261 | **1.000** |
+| near negatives (re-cited to another passage of the same document) | 256 | **1.000** |
+
+Read this for what it is. The positives are quotations, which is the easiest
+possible case for a lexical checker: a model's paraphrase shares fewer words
+with its source and would produce false alarms this measurement cannot see.
+The near-negative control had to be built carefully - chunks of one document
+overlap by design, so a "different passage" regularly contains the claim
+verbatim and is not a negative at all; those are excluded, and without that
+exclusion the same run reported 0.65 for no real reason.
+
+What the checker is good at is the failure that matters most in a RAG system:
+a number, a date or an amount attributed to a passage that does not contain it.
+What it cannot do is judge whether a claim is true, or catch a paraphrase that
+is subtly wrong but lexically close. An LLM judge is available for that job
+(`verify_backend: "llm"`) and is unmeasured here for want of a provider.
+
+Verification never rewrites or withholds an answer. It labels claims, and the
+interface shows how many were not supported.
+
+## Also in this phase
+
+- Structured citations: when `structured_citations` is on and a provider is
+  configured, the model is asked for `{answer, claims}` and the result is
+  rendered back into inline `[1]` markers, so every reader downstream - the
+  highlighter, the stored conversation, the export - keeps working unchanged.
+  Malformed or self-contradicting JSON falls back to reading the markers out of
+  prose. Unmeasured end to end: it needs a provider.
+- `claim_for_citation` returned the whole answer when the model omitted a
+  marker, which made every citation highlight the same sentence. It now picks
+  the sentence sharing the most content words with the cited passage.
+- A claim that is only a marker is no longer a claim. `[1]` written after a
+  full stop became its own sentence when the answer was split, and then failed
+  verification because "1" read as a number the source did not contain.

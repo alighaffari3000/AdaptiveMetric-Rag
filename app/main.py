@@ -13,20 +13,23 @@ from pathlib import Path
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import database
+from .claims import ABSTAIN_MARKER, Claim, claims_from_markers, parse_structured, with_markers
 from .documents import (ALLOWED, content_digest, find_duplicate, ingest, parent_windows,
                         refresh_chunk_tokens)
 from .embeddings import embedding_info, is_semantic, reindex_all
 from .index import index as chunk_index
 from .net import ProviderError, redact
-from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
+from .models import AppSettings, ChatRequest, ChatResponse, Citation, ClaimView, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence
 from .search import search
-from .text import NORMALIZER_VERSION
+from .streaming import sse, stream_answer
+from .verify import verify
+from .text import NORMALIZER_VERSION, tokenize
 
 
 logger = logging.getLogger("adaptive_metric_rag")
@@ -59,7 +62,8 @@ def refresh_saved_citation_highlights() -> None:
         for citation in citations:
             chunk = database.row("SELECT content FROM chunks WHERE id=?", (citation.get("chunk_id", ""),))
             if chunk:
-                claim = claim_for_citation(message["content"], int(citation.get("id", 0)))
+                claim = claim_for_citation(message["content"], int(citation.get("id", 0)),
+                                           chunk["content"])
                 citation["highlight"] = best_evidence(question, chunk["content"], claim)
                 changed = True
         if changed:
@@ -107,23 +111,55 @@ def no_evidence_answer(language: str) -> str:
     return "The answer to this question was not found in the available sources. Please add a relevant document or make the question more specific."
 
 
-def claim_for_citation(answer: str, citation_id: int) -> str:
+def claim_for_citation(answer: str, citation_id: int, chunk: str = "") -> str:
+    """The part of the answer that rests on this citation.
+
+    When the model wrote the `[n]` marker this is exact. When it did not, the
+    whole answer used to be returned, which made the highlighter pick the
+    sentence that matched the whole answer rather than this source - usually
+    the same sentence for every citation. The closest sentence by shared
+    content words is a far better guess, and falls back to the whole answer
+    only when there is nothing to compare against.
+    """
     marker = f"[{citation_id}]"
-    sentences = re.split(r"(?<=[.!?؟؛])\s+|\n+", answer)
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?؟؛])\s+|\n+", answer) if part.strip()]
     matching = [sentence for sentence in sentences if marker in sentence]
-    return " ".join(matching) if matching else answer
+    if matching:
+        return " ".join(matching)
+    chunk_terms = set(tokenize(chunk))
+    if not chunk_terms or not sentences:
+        return answer
+
+    def overlap(sentence: str) -> float:
+        terms = set(tokenize(sentence))
+        return len(terms & chunk_terms) / max(len(terms), 1)
+
+    best = max(sentences, key=overlap)
+    return best if overlap(best) > 0 else answer
+
+
+# Kept for conversations answered before the marker existed, and for a model
+# that ignores the instruction to emit it.
+_LEGACY_ABSTENTIONS = (
+    "پاسخ این سؤال در منابع موجود پیدا نشد",
+    "پاسخ این سوال در منابع موجود پیدا نشد",
+    "اطلاعات کافی برای پاسخ در منابع وجود ندارد",
+    "the answer was not found in the available sources",
+    "the provided sources do not contain enough information to answer",
+)
 
 
 def answer_abstained(answer: str) -> bool:
+    """Whether the model said the sources cannot answer the question.
+
+    The model is asked to emit one exact token for this. Matching prose was the
+    old method and it could only ever recognise the phrasings someone had
+    already seen, in the two languages they had seen them in.
+    """
+    if ABSTAIN_MARKER in answer:
+        return True
     normalized = answer.strip().lower()
-    phrases = (
-        "پاسخ این سؤال در منابع موجود پیدا نشد",
-        "پاسخ این سوال در منابع موجود پیدا نشد",
-        "اطلاعات کافی برای پاسخ در منابع وجود ندارد",
-        "the answer was not found in the available sources",
-        "the provided sources do not contain enough information to answer",
-    )
-    return any(phrase in normalized for phrase in phrases)
+    return any(phrase in normalized for phrase in _LEGACY_ABSTENTIONS)
 
 
 def load_settings() -> AppSettings:
@@ -376,38 +412,21 @@ def conversation_history(conversation_id: str, turns: int) -> list[dict[str, str
     return [{"role": message["role"], "content": message["content"]} for message in reversed(recent)]
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    started = time.perf_counter()
-    settings = load_settings()
-    history = conversation_history(request.conversation_id or "", settings.history_turns)
-    try:
-        result = await search(settings, request.message, request.filters, history,
-                              request.conversation_id or "")
-    except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
-        raise HTTPException(502, f"Retrieval failed: {redact(exc)}") from exc
+def finish_answer(settings: AppSettings, request: ChatRequest, result, answer: str,
+                  claims: list[Claim], started: float) -> ChatResponse:
+    """Everything that happens once the answer text exists.
 
+    Shared by the streaming and non-streaming endpoints so the two cannot drift
+    apart: the same abstention rule, the same citations, the same persisted
+    conversation. What the reader gets first differs; what is stored does not.
+    """
     evidence_found = result.evidence_found
     grounded_chunks = result.chunks
-    # Retrieval scored small chunks; the model answers from the windows around
-    # them, so a fact never arrives without the sentences that qualify it.
-    context = await asyncio.to_thread(parent_windows, grounded_chunks) if grounded_chunks else []
-    if evidence_found:
-        try:
-            answer = await generate(settings, request.message, context, result.analysis.language, history)
-        except (httpx.HTTPError, ProviderError, KeyError, ValueError) as first_exc:
-            logger.warning("Generation failed; retrying with reduced context: %r", first_exc, exc_info=True)
-            try:
-                answer = await generate(settings, request.message, context[:2],
-                                        result.analysis.language, history)
-            except (httpx.HTTPError, ProviderError, KeyError, ValueError) as retry_exc:
-                logger.error("Generation retry failed; using grounded extractive fallback: %r", retry_exc, exc_info=True)
-                answer = local_answer(request.message, context, result.analysis.language)
-    else:
-        answer = no_evidence_answer(result.analysis.language)
     if evidence_found and answer_abstained(answer):
         evidence_found = False
         grounded_chunks = []
+        answer = no_evidence_answer(result.analysis.language)
+        claims = []
     # Highlighting reads the retrieved question: for a follow-up, the words that
     # located the passage are the ones the conversation supplied, not «و مبلغش؟».
     highlight_query = result.plan.question if result.plan else request.message
@@ -415,7 +434,8 @@ async def chat(request: ChatRequest):
         id=i, document_id=chunk["document_id"], document_name=chunk["document_name"], chunk_id=chunk["id"],
         page=chunk.get("page"), page_end=chunk.get("page_end"), section=chunk.get("section"),
         section_path=chunk.get("section_path") or "", excerpt=chunk["content"][:420],
-        highlight=best_evidence(highlight_query, chunk["content"], claim_for_citation(answer, i)), score=chunk["score"],
+        highlight=best_evidence(highlight_query, chunk["content"],
+                                claim_for_citation(answer, i, chunk["content"])), score=chunk["score"],
     ) for i, chunk in enumerate(grounded_chunks, 1)]
     conversation_id = request.conversation_id or uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
@@ -425,13 +445,129 @@ async def chat(request: ChatRequest):
     database.execute("INSERT INTO messages(id,conversation_id,role,content,citations,created_at) VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, conversation_id, "assistant", answer, database.json_value([c.model_dump() for c in citations]), now))
     database.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
     return ChatResponse(
-        conversation_id=conversation_id, answer=answer, citations=citations, analysis=result.analysis,
+        conversation_id=conversation_id, answer=answer, citations=citations,
+        claims=[ClaimView(**claim.as_dict()) for claim in claims], analysis=result.analysis,
         confidence=result.confidence, latency_ms=round((time.perf_counter() - started) * 1000),
         provider=settings.provider,
         early_exit=(result.early_exit and settings.enable_early_exit
                     and result.confidence >= settings.confidence_threshold),
         evidence_found=evidence_found, reranked=result.reranked, timings_ms=result.timings_ms,
     )
+
+
+async def read_claims(settings: AppSettings, answer: str, context: list[dict],
+                      structured: bool) -> tuple[str, list[Claim]]:
+    """The answer's claims, from its JSON when there is any and its markers otherwise."""
+    claims: list[Claim] = []
+    if structured:
+        parsed = parse_structured(answer, len(context))
+        if parsed is not None:
+            answer, claims = parsed
+            answer = with_markers(answer, claims)
+        else:
+            logger.warning("structured citations were requested but could not be read; "
+                           "falling back to the inline markers")
+    if not claims:
+        claims = claims_from_markers(answer)
+    sources = {number: chunk["content"] for number, chunk in enumerate(context, 1)}
+    return answer, await verify(settings, claims, sources)
+
+
+async def prepare_answer(settings: AppSettings, request: ChatRequest):
+    """Retrieve, and widen the retrieved chunks into what the model will read."""
+    history = conversation_history(request.conversation_id or "", settings.history_turns)
+    try:
+        result = await search(settings, request.message, request.filters, history,
+                              request.conversation_id or "")
+    except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
+        raise HTTPException(502, f"Retrieval failed: {redact(exc)}") from exc
+    # Retrieval scored small chunks; the model answers from the windows around
+    # them, so a fact never arrives without the sentences that qualify it.
+    context = await asyncio.to_thread(parent_windows, result.chunks) if result.chunks else []
+    return result, context, history
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    started = time.perf_counter()
+    settings = load_settings()
+    result, context, history = await prepare_answer(settings, request)
+    structured = settings.structured_citations and settings.provider != "local"
+
+    if result.evidence_found:
+        try:
+            answer = await generate(settings, request.message, context, result.analysis.language,
+                                    history, structured)
+        except (httpx.HTTPError, ProviderError, KeyError, ValueError) as first_exc:
+            logger.warning("Generation failed; retrying with reduced context: %r", first_exc, exc_info=True)
+            try:
+                answer = await generate(settings, request.message, context[:2],
+                                        result.analysis.language, history, structured)
+            except (httpx.HTTPError, ProviderError, KeyError, ValueError) as retry_exc:
+                logger.error("Generation retry failed; using grounded extractive fallback: %r", retry_exc, exc_info=True)
+                answer = local_answer(request.message, context, result.analysis.language)
+                structured = False
+    else:
+        answer, structured = no_evidence_answer(result.analysis.language), False
+
+    claims: list[Claim] = []
+    if result.evidence_found:
+        answer, claims = await read_claims(settings, answer, context, structured)
+    return finish_answer(settings, request, result, answer, claims, started)
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """The same answer, sent as it is written.
+
+    Sources are known before the first token is asked for, so they are sent
+    first: the reader can start reading the evidence during the seconds the
+    model spends composing. The stored conversation and the final payload are
+    produced by the same code as `/api/chat`.
+    """
+    started = time.perf_counter()
+    settings = load_settings()
+    result, context, history = await prepare_answer(settings, request)
+    structured = settings.structured_citations and settings.provider != "local"
+
+    async def events():
+        # A local copy: the fallback below turns structured output off for this
+        # answer only, and a closure cannot rebind the enclosing name.
+        structured_output = structured
+        yield sse("meta", {"analysis": result.analysis.model_dump(), "confidence": result.confidence,
+                           "evidence_found": result.evidence_found, "reranked": result.reranked,
+                           "timings_ms": result.timings_ms, "provider": settings.provider})
+        if not result.evidence_found:
+            answer = no_evidence_answer(result.analysis.language)
+            yield sse("delta", {"text": answer})
+            payload = finish_answer(settings, request, result, answer, [], started)
+            yield sse("done", payload.model_dump())
+            return
+
+        answer = ""
+        try:
+            async for kind, piece in stream_answer(settings, request.message, context,
+                                                   result.analysis.language, history, structured_output):
+                if kind == "delta" and not structured_output:
+                    yield sse("delta", {"text": piece})
+                elif kind == "replace":
+                    yield sse("replace", {"text": piece})
+                elif kind == "done":
+                    answer = piece
+        except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
+            logger.error("Streaming generation failed; using the extractive fallback: %r", exc, exc_info=True)
+            answer = local_answer(request.message, context, result.analysis.language)
+            structured_output = False
+            yield sse("replace", {"text": answer})
+
+        answer, claims = await read_claims(settings, answer, context, structured_output)
+        payload = finish_answer(settings, request, result, answer, claims, started)
+        if structured_output or payload.answer != answer:
+            yield sse("replace", {"text": payload.answer})
+        yield sse("done", payload.model_dump())
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/conversations")

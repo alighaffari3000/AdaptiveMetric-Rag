@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from .claims import ABSTAIN_MARKER
 from .models import AppSettings
 from .net import ensure_success, post_with_retry
 
@@ -36,6 +37,8 @@ def _looks_incomplete(question: str, answer: str, finish_reason: str = "",
     clean = answer.strip()
     if not clean:
         return True
+    if ABSTAIN_MARKER in clean:
+        return False  # refusing is a complete answer, however short
     if finish_reason.lower() in {"length", "max_tokens", "max_tokens_reached"}:
         return True
     unbalanced = clean.count("(") > clean.count(")") or clean.count("**") % 2 == 1
@@ -85,6 +88,33 @@ def _language_instruction(language: str) -> str:
     return "Mandatory language rule: write the complete answer in English."
 
 
+def _abstain_instruction(language: str) -> str:
+    """One exact token for "the sources do not answer this".
+
+    Detecting abstention by matching prose meant keeping a list of the phrases
+    each model happens to use, in two languages, and being quietly wrong about
+    the next one. A token the model is told to emit is checked exactly.
+    """
+    if language == "fa":
+        return (f"اگر منابع بالا پاسخ سؤال را ندارند، دقیقاً همین نشانه را بنویس: {ABSTAIN_MARKER} "
+                "و هیچ پاسخ حدسی ننویس.")
+    return (f"If the sources above do not answer the question, reply with exactly this token: "
+            f"{ABSTAIN_MARKER} - and do not guess.")
+
+
+def _structured_instruction(language: str, count: int) -> str:
+    """Ask for the answer and its claims as JSON, when the caller wants them."""
+    shape = ('{"answer": "<the full answer text>", '
+             '"claims": [{"text": "<one sentence of the answer>", "source_ids": [1]}]}')
+    if language == "fa":
+        return (f"خروجی را فقط به شکل JSON بنویس: {shape} — هر جمله پاسخ یک claim است و "
+                f"source_ids شماره منابع (۱ تا {count}) است که همان جمله بر آن‌ها تکیه دارد. "
+                "جمله‌ای که به هیچ منبعی تکیه ندارد source_ids خالی می‌گیرد.")
+    return (f"Reply with JSON only, in this shape: {shape} - one claim per sentence of the answer, "
+            f"source_ids being the source numbers (1 to {count}) that sentence rests on. "
+            "A sentence resting on no source gets an empty source_ids.")
+
+
 def _wrong_language(language: str, answer: str) -> bool:
     """Detect a clearly English response to a Persian question without rejecting names/URLs."""
     if language != "fa":
@@ -131,7 +161,7 @@ def _history_block(history: list[dict[str, str]] | None, language: str) -> str:
 
 
 def build_prompt(question: str, chunks: list[dict[str, Any]], system_prompt: str, language: str,
-                 history: list[dict[str, str]] | None = None) -> tuple[str, str]:
+                 history: list[dict[str, str]] | None = None, structured: bool = False) -> tuple[str, str]:
     sources = "\n\n".join(
         f"[{i}] Document: {chunk['document_name']} | Page: {chunk.get('page') or '-'}\n{chunk['content']}"
         for i, chunk in enumerate(chunks, 1)
@@ -145,6 +175,9 @@ def build_prompt(question: str, chunks: list[dict[str, Any]], system_prompt: str
         user = (f"Question:\n{question}{context}\n\nSources:\n{sources}\n\nGive a complete, direct answer "
                 "grounded in these sources. Answer every requested part separately, include inline citations, "
                 "and do not stop mid-sentence.")
+    user += "\n\n" + _abstain_instruction(language)
+    if structured:
+        user += "\n\n" + _structured_instruction(language, len(chunks))
     return system_prompt.strip() + "\n\n" + _language_instruction(language), user
 
 
@@ -161,10 +194,11 @@ def local_answer(question: str, chunks: list[dict[str, Any]], language: str) -> 
 
 
 async def generate(settings: AppSettings, question: str, chunks: list[dict[str, Any]], language: str,
-                   history: list[dict[str, str]] | None = None) -> str:
+                   history: list[dict[str, str]] | None = None, structured: bool = False) -> str:
     if settings.provider == "local":
         return local_answer(question, chunks, language)
-    system, user = build_prompt(question, chunks, settings.system_prompt, language, history)
+    system, user = build_prompt(question, chunks, settings.system_prompt, language, history,
+                                structured=structured)
     strict = settings.strict_multipart_answers
     timeout = httpx.Timeout(150.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:

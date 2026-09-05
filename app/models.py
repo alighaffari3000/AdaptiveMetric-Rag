@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 ProviderName = Literal["local", "ollama", "openai", "gemini"]
 EmbeddingProviderName = Literal["local", "ollama", "sentence-transformers", "openai", "gemini"]
 RerankBackend = Literal["cross-encoder", "llm"]
+VerifyBackend = Literal["lexical", "llm"]
 
 
 class AppSettings(BaseModel):
@@ -36,6 +37,13 @@ class AppSettings(BaseModel):
     # Treat a short answer to a two-part question as truncated. It sends correct
     # short answers into the repair loop, so it is off unless asked for.
     strict_multipart_answers: bool = False
+    # Ask the model for {answer, claims} rather than reading [1] markers out of
+    # prose. Falls back to the markers whenever the JSON cannot be trusted.
+    structured_citations: bool = False
+    # Check every cited claim against the passage it cites, and label the ones
+    # the passage does not support. Never rewrites or withholds an answer.
+    verify_claims: bool = True
+    verify_backend: VerifyBackend = "lexical"
     system_prompt: str = "Answer only from the supplied sources. Cite claims using [1], [2], etc. If the sources are insufficient, say so clearly."
     embedding_provider: EmbeddingProviderName = "local"
     embedding_model: str = "multilingual-feature-hashing-v1"
@@ -123,10 +131,20 @@ class QueryAnalysis(BaseModel):
         return value or ([primary] if primary else [])
 
 
+class ClaimView(BaseModel):
+    """One statement of the answer and whether its citation holds it up."""
+
+    text: str
+    source_ids: list[int] = Field(default_factory=list)
+    # None means nothing was cited, so there was nothing to check.
+    supported: bool | None = None
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     answer: str
     citations: list[Citation]
+    claims: list[ClaimView] = Field(default_factory=list)
     analysis: QueryAnalysis
     confidence: float
     latency_ms: int
