@@ -19,7 +19,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "adaptive_rag.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _local = threading.local()
 _write_lock = threading.RLock()
@@ -94,11 +94,20 @@ def _create_schema(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS documents (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL,
           size INTEGER NOT NULL, chunks INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}'
+          created_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'ready', progress REAL NOT NULL DEFAULT 1.0,
+          error TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS parents (
+          id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL, content TEXT NOT NULL,
+          page_start INTEGER, page_end INTEGER, section_path TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_parents_document ON parents(document_id);
         CREATE TABLE IF NOT EXISTS chunks (
           id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-          position INTEGER NOT NULL, page INTEGER, section TEXT,
+          position INTEGER NOT NULL, page INTEGER, page_end INTEGER, section TEXT,
+          section_path TEXT NOT NULL DEFAULT '', parent_id TEXT,
           content TEXT NOT NULL, vector BLOB NOT NULL, tokens TEXT NOT NULL,
           metadata TEXT NOT NULL DEFAULT '{}'
         );
@@ -163,12 +172,39 @@ def _migrate_embeddings_to_blob(db: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_structural_columns(db: sqlite3.Connection) -> None:
+    """Schema v2: page ranges, section paths, parent windows, ingestion status.
+
+    Added rather than rebuilt: every new column has a default that describes an
+    existing row correctly, so a library from v1 keeps working - its chunks
+    simply have no parent window until the document is uploaded again.
+    """
+    additions = {
+        "chunks": [("page_end", "INTEGER"), ("section_path", "TEXT NOT NULL DEFAULT ''"),
+                   ("parent_id", "TEXT")],
+        "documents": [("status", "TEXT NOT NULL DEFAULT 'ready'"),
+                      ("progress", "REAL NOT NULL DEFAULT 1.0"),
+                      ("error", "TEXT NOT NULL DEFAULT ''")],
+    }
+    for table, columns in additions.items():
+        existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns:
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                logger.info("added column %s.%s", table, name)
+
+
 def init_db() -> None:
     with connect() as db:
         _create_schema(db)
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             _migrate_embeddings_to_blob(db)
+        if version < 2:
+            _migrate_structural_columns(db)
+        # Indexed after the migration: on a v1 database the column it covers is
+        # only added a line above.
+        db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_parent ON chunks(parent_id)")
         if version < SCHEMA_VERSION:
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 

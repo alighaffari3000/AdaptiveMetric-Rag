@@ -477,15 +477,15 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     for position in candidates:
         row = snapshot.rows[position]
         content = snapshot.folded[position]
-        metadata_text = snapshot.folded_meta[position]
+        metadata = snapshot.folded_meta[position]
         features = {
             "dense": float(dense[position]),
             "bm25": float(lexical[position] / bm_max),
-            "keyword": _multi_keyword_signal(analysis.keywords, content + " " + metadata_text),
+            "keyword": _multi_keyword_signal(analysis.keywords, content + " " + metadata),
             "entity": _overlap(analysis.entities, content),
             "numeric": _term_signal(analysis.numbers, snapshot.numbers[position], numeric_intent),
             "temporal": _term_signal(analysis.temporal_terms, snapshot.dates[position], temporal_intent),
-            "metadata": _overlap(qtokens[:6], metadata_text),
+            "metadata": _overlap(qtokens[:6], metadata),
         }
         for name, value in features.items():
             signals[name].append(value)

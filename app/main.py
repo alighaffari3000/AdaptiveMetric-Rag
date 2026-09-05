@@ -12,12 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import database
-from .documents import ALLOWED, content_digest, find_duplicate, ingest, refresh_chunk_tokens
+from .documents import (ALLOWED, content_digest, find_duplicate, ingest, parent_windows,
+                        refresh_chunk_tokens)
 from .embeddings import embedding_info, is_semantic, reindex_all
 from .index import index as chunk_index
 from .net import ProviderError, redact
@@ -269,8 +270,30 @@ async def list_documents():
     return database.rows("SELECT * FROM documents ORDER BY created_at DESC")
 
 
-@app.post("/api/documents")
-async def upload_document(file: UploadFile = File(...)):
+async def run_ingestion(document_id: str, filename: str, content_type: str, payload: bytes,
+                        settings: AppSettings) -> None:
+    """Ingest one document, recording where it got to and why it stopped."""
+
+    def progress(fraction: float) -> None:
+        database.execute("UPDATE documents SET progress=? WHERE id=?", (fraction, document_id))
+
+    try:
+        await ingest(filename, content_type, payload, settings, document_id=document_id, progress=progress)
+    except Exception as exc:
+        logger.error("ingestion failed for %s: %r", filename, exc, exc_info=True)
+        database.execute("UPDATE documents SET status='failed', error=? WHERE id=?",
+                         (redact(exc)[:500], document_id))
+
+
+@app.post("/api/documents", status_code=202)
+async def upload_document(background: BackgroundTasks, file: UploadFile = File(...)):
+    """Accept the file, then parse it outside the request.
+
+    A large PDF used to hold the HTTP connection open for its whole extraction
+    and embedding run, with nothing to show for it until the end. The document
+    row now appears immediately with `status="processing"`, and
+    `/api/documents/{id}/status` reports how far it has got.
+    """
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED:
         raise HTTPException(415, f"Unsupported format. Use: {', '.join(sorted(ALLOWED))}")
@@ -286,12 +309,33 @@ async def upload_document(file: UploadFile = File(...)):
             f"This file is already in the library as '{duplicate['name']}'. "
             "Delete it first to replace it.",
         )
+    settings = load_settings()
+    filename = file.filename or "document"
+    document_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    database.execute(
+        "INSERT INTO documents(id,name,type,size,chunks,created_at,metadata,status,progress,error) "
+        "VALUES(?,?,?,?,0,?,?,'processing',0.0,'')",
+        (document_id, filename, file.content_type or "application/octet-stream", len(payload), now,
+         database.json_value({"sha256": content_digest(payload)})),
+    )
+    background.add_task(run_ingestion, document_id, filename, file.content_type or "", payload, settings)
+    return {"id": document_id, "name": filename, "type": file.content_type, "size": len(payload),
+            "chunks": 0, "created_at": now, "status": "processing", "progress": 0.0}
+
+
+@app.get("/api/documents/{document_id}/status")
+async def document_status(document_id: str):
+    document = database.row(
+        "SELECT id,name,status,progress,error,chunks,metadata FROM documents WHERE id=?", (document_id,))
+    if not document:
+        raise HTTPException(404, "Document not found")
     try:
-        settings = load_settings()
-        return await ingest(file.filename or "document", file.content_type or "", payload,
-                            settings.chunk_size, settings.chunk_overlap, settings)
-    except Exception as exc:
-        raise HTTPException(400, f"Could not process document: {redact(exc)}") from exc
+        metadata = json.loads(document.pop("metadata") or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    document["warnings"] = metadata.get("warnings", [])
+    return document
 
 
 @app.delete("/api/documents/{document_id}")
@@ -307,7 +351,7 @@ async def delete_document(document_id: str):
 @app.get("/api/chunks/{chunk_id}")
 async def get_chunk(chunk_id: str):
     chunk = database.row(
-        "SELECT c.id,c.document_id,c.page,c.section,c.content,d.name document_name "
+        "SELECT c.id,c.document_id,c.page,c.page_end,c.section,c.section_path,c.content,d.name document_name "
         "FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.id=?",
         (chunk_id,),
     )
@@ -345,17 +389,20 @@ async def chat(request: ChatRequest):
 
     evidence_found = result.evidence_found
     grounded_chunks = result.chunks
+    # Retrieval scored small chunks; the model answers from the windows around
+    # them, so a fact never arrives without the sentences that qualify it.
+    context = await asyncio.to_thread(parent_windows, grounded_chunks) if grounded_chunks else []
     if evidence_found:
         try:
-            answer = await generate(settings, request.message, grounded_chunks, result.analysis.language, history)
+            answer = await generate(settings, request.message, context, result.analysis.language, history)
         except (httpx.HTTPError, ProviderError, KeyError, ValueError) as first_exc:
             logger.warning("Generation failed; retrying with reduced context: %r", first_exc, exc_info=True)
             try:
-                answer = await generate(settings, request.message, grounded_chunks[:2],
+                answer = await generate(settings, request.message, context[:2],
                                         result.analysis.language, history)
             except (httpx.HTTPError, ProviderError, KeyError, ValueError) as retry_exc:
                 logger.error("Generation retry failed; using grounded extractive fallback: %r", retry_exc, exc_info=True)
-                answer = local_answer(request.message, grounded_chunks, result.analysis.language)
+                answer = local_answer(request.message, context, result.analysis.language)
     else:
         answer = no_evidence_answer(result.analysis.language)
     if evidence_found and answer_abstained(answer):
@@ -366,7 +413,8 @@ async def chat(request: ChatRequest):
     highlight_query = result.plan.question if result.plan else request.message
     citations = [Citation(
         id=i, document_id=chunk["document_id"], document_name=chunk["document_name"], chunk_id=chunk["id"],
-        page=chunk.get("page"), section=chunk.get("section"), excerpt=chunk["content"][:420],
+        page=chunk.get("page"), page_end=chunk.get("page_end"), section=chunk.get("section"),
+        section_path=chunk.get("section_path") or "", excerpt=chunk["content"][:420],
         highlight=best_evidence(highlight_query, chunk["content"], claim_for_citation(answer, i)), score=chunk["score"],
     ) for i, chunk in enumerate(grounded_chunks, 1)]
     conversation_id = request.conversation_id or uuid.uuid4().hex

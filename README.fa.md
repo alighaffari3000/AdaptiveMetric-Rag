@@ -18,7 +18,13 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 - جستجوی چندکلیدواژه‌ای فارسی/انگلیسی و ترکیب چند بردار Query برای retrieval بین‌زبانی
 - مسیر سه‌مرحله‌ای candidate retrieval، adaptive scoring و grounded generation
 - confidence score و سیگنال early exit
-- پشتیبانی از PDF، DOCX، TXT، Markdown، CSV، JSON و HTML
+- پشتیبانی از PDF، DOCX، TXT، Markdown، CSV، JSON و HTML؛ عنوان‌ها به مسیر بخش تبدیل و ردیف‌های جدول
+  به‌صورت «ستون: مقدار» سریال می‌شوند
+- خواندن PDF فارسی به همان ترتیبی که نوشته شده: صفحه آینه‌ای تشخیص و ترمیم می‌شود و عددهایی که
+  بازچینش دوطرفه برعکسشان کرده با مقابله دو موتور PDF بازیابی می‌شوند
+- قطعه‌بندی والد/فرزند: چانک کوچک بازیابی می‌شود و پنجره اطرافش به مدل داده می‌شود؛ چانک می‌تواند از
+  مرز صفحه عبور کند تا واقعیتی که مرز صفحه نصفش کرده از دست نرود
+- پردازش سند در پس‌زمینه با گزارش پیشرفت در `/api/documents/{id}/status`
 - citation درون پاسخ همراه نام فایل، شماره صفحه، excerpt، chunk ID و score
 - حالت Local بدون API key و پشتیبانی از Ollama، OpenAI-compatible/dedicated و Gemini
 - انتخاب embedding محلی یا مدل نصب‌شده در Ollama همراه re-index خودکار هنگام تغییر مدل

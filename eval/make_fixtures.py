@@ -111,11 +111,75 @@ def build_pdf(pages: list[list[str]]) -> bytes:
     return bytes(out)
 
 
+FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+
+# One line per sentence, in logical order - the order a reader reads them in and
+# the order extraction has to return them in.
+PERSIAN_LINES = [
+    "قرارداد خدمات فنی شماره ۱۳۷",
+    "مبلغ کل قرارداد ۲٬۴۰۰٬۰۰۰٬۰۰۰ ریال است.",
+    "قرارداد در تاریخ ۱۴۰۶/۰۱/۱۴ خاتمه می‌یابد.",
+]
+# DejaVu is the font on this image that covers both Persian letters and Persian
+# digits; the builder falls back to any font that does.
+FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSerif.ttf",
+]
+
+
+def persian_font_path() -> str | None:
+    for candidate in FONT_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def build_persian_pdf(right_to_left: bool) -> bytes | None:
+    """A Persian PDF laid out the way a real producer would lay it out.
+
+    `right_to_left` picks which kind of producer: one that reorders the glyphs
+    for display, or one that simply places them in logical order. Extraction
+    fails differently on each, which is the whole point of having both.
+    Returns None when the machine has no font with Persian glyphs.
+    """
+    try:
+        import pymupdf
+    except ImportError:
+        return None
+    font_path = persian_font_path()
+    if font_path is None:
+        return None
+
+    document = pymupdf.open()
+    page = document.new_page()
+    font = pymupdf.Font(fontfile=font_path)
+    writer = pymupdf.TextWriter(page.rect)
+    y = 100.0
+    for line in PERSIAN_LINES:
+        width = font.text_length(line, 14)
+        x = page.rect.width - 72 - width if right_to_left else 72
+        writer.append((x, y), line, font=font, fontsize=14, right_to_left=right_to_left)
+        y += 30
+    writer.write_text(page)
+    return document.tobytes()
+
+
 def main() -> None:
     CORPUS.mkdir(parents=True, exist_ok=True)
     target = CORPUS / "annual-review.en.pdf"
     target.write_bytes(build_pdf([PAGE_ONE, PAGE_TWO]))
     print(f"wrote {target} ({target.stat().st_size} bytes)")
+
+    FIXTURES.mkdir(parents=True, exist_ok=True)
+    for rtl, name in ((True, "persian-visual-order.pdf"), (False, "persian-logical-order.pdf")):
+        data = build_persian_pdf(rtl)
+        if data is None:
+            print(f"skipped {name}: PyMuPDF or a Persian-capable font is missing")
+            continue
+        path = FIXTURES / name
+        path.write_bytes(data)
+        print(f"wrote {path} ({path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

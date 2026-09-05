@@ -33,8 +33,8 @@ B = .75
 SATURATION = 1.5  # the `tf + 1.5 * (...)` denominator term of the original formula
 
 CHUNK_QUERY = (
-    "SELECT c.id,c.document_id,c.position,c.page,c.section,c.content,c.vector,c.tokens,c.metadata,"
-    "d.name document_name,d.type document_type "
+    "SELECT c.id,c.document_id,c.position,c.page,c.page_end,c.section,c.section_path,c.parent_id,"
+    "c.content,c.vector,c.tokens,c.metadata,d.name document_name,d.type document_type "
     "FROM chunks c JOIN documents d ON d.id=c.document_id "
     "ORDER BY c.rowid"
 )
@@ -212,7 +212,8 @@ def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
         content = raw["content"]
         folded.append(normalize(content))
         folded_meta.append(normalize(
-            f'{raw.get("document_name") or ""} {raw.get("section") or ""} {raw.get("document_type") or ""}'
+            f'{raw.get("document_name") or ""} {raw.get("section_path") or raw.get("section") or ""} '
+            f'{raw.get("document_type") or ""}'
         ))
         numbers.append(frozenset(number_terms(content)))
         dates.append(frozenset(date_terms(content)))

@@ -5,6 +5,8 @@ This exercises upload, chat, citations, filtering, and delete against the real
 app so that refactor cannot quietly break the API.
 """
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -31,9 +33,20 @@ def client(fresh_db):
 
 
 def upload(client, name: str, payload: bytes):
+    """Upload and wait for ingestion, which now runs behind the request."""
     response = client.post("/api/documents", files={"file": (name, payload, "text/plain")})
-    assert response.status_code == 200, response.text
-    return response.json()
+    assert response.status_code == 202, response.text
+    accepted = response.json()
+    assert accepted["status"] == "processing"
+    # TestClient runs background tasks before returning, so one poll is enough;
+    # the loop is here so a slower runner cannot make the suite flaky.
+    for _ in range(50):
+        status = client.get(f"/api/documents/{accepted['id']}/status").json()
+        if status["status"] != "processing":
+            break
+        time.sleep(.05)
+    assert status["status"] == "ready", status
+    return {**accepted, **status}
 
 
 def test_health_reports_an_empty_corpus(client):

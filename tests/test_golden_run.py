@@ -59,10 +59,19 @@ def test_retrieval_does_not_regress_below_the_recorded_baseline(report):
     assert summary["hit@5"] >= 0.82, summary
     assert summary["mrr"] >= 0.72, summary
     assert summary["ndcg@10"] >= 0.75, summary
+    # What the answering model is handed, which is the parent window of every
+    # retrieved child, carries the answer more often than the child alone does.
+    assert summary["delivered_hit@5"] >= 0.86, summary
+    assert summary["delivered_hit@5"] >= summary["hit@5"], summary
 
 
 def test_english_monolingual_slice_stays_saturated(report):
     assert report["by_tag"]["en2en"]["hit@5"] >= 0.95, report["by_tag"]["en2en"]
+
+
+def test_a_chunk_spans_the_page_break_phase_5_was_for(report):
+    """Both cold-chain questions need text from two pages in one chunk."""
+    assert report["by_tag"]["page_boundary"]["hit@5"] == 1.0, report["by_tag"]["page_boundary"]
 
 
 def test_follow_up_questions_meet_the_phase_4_criterion(report):

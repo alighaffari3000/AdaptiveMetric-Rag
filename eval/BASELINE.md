@@ -477,3 +477,127 @@ The rewriter adds one cheap completion per question for non-local providers,
 cached by conversation, message and the turns it was derived from. The offline
 path adds no call at all and costs about 0.1 ms. Folding each chunk at index
 build time is what keeps the query path free of it: p95 latency did not rise.
+
+---
+
+# Phase 5 — document input and chunking
+
+Measured 2026-09-05, feature-hashing default, same corpus and golden set.
+
+Reproduce with:
+
+```
+python -m eval.run_eval
+python -m eval.run_eval --child-tokens 500      # the sweep below
+pytest tests/test_ingestion.py
+```
+
+## Quality
+
+| Metric | Phase 4 | Phase 5 |
+|---|---:|---:|
+| hit@5 (child chunks) | 0.844 | 0.833 |
+| recall@5 | 0.839 | 0.830 |
+| MRR | 0.743 | 0.729 |
+| nDCG@10 | 0.770 | 0.759 |
+| **delivered hit@5** | 0.844 | **0.878** |
+| page_boundary hit@5 | 0.000 | **1.000** |
+| pdf hit@5 | 0.500 | **1.000** |
+| answerable not abstained | 0.978 | 0.978 |
+
+`delivered_hit@5` is new and is the honest measure of this phase. The ranking
+metrics score child chunks; the answering model is handed the parent window
+around each retrieved child, so a fact one sentence past the child's edge still
+reaches it. In Phase 4 there were no parents, so the two numbers were the same
+thing. Reported separately, never mixed into hit@5.
+
+Read together: the child-level numbers dipped by about one point because the
+retrieval task got harder - 31 chunks became 32, but they now follow sections
+rather than character counts, so a question about the training budget has to
+pick the right third of the HR policy instead of hitting the one chunk that was
+the whole document. What actually reaches the model improved by 3.4 points.
+
+## The two page-boundary cases
+
+Both now pass, which was the phase's acceptance criterion. The fix that
+mattered was not page-spanning chunks by themselves but the overlap rule:
+consecutive children carry over the previous sentence even when it is longer
+than the overlap budget. The evaluation PDF's cold-chain explanation is a
+60-token sentence cut by the page break, and the budget is 40, so the carry-over
+was skipped and both halves lost the other. One sentence is now always carried
+when it fits in half a chunk.
+
+## Persian PDFs: the plan's premise did not hold
+
+The plan assumed PyMuPDF reads Persian in the correct order and `pypdf` is the
+fallback. Measured on two fixtures built with the same text and opposite layout
+strategies (`eval/make_fixtures.py`, `tests/test_ingestion.py`), comparing
+codepoints rather than what a terminal displays:
+
+| Producer laid glyphs out | PyMuPDF | pypdf |
+|---|---|---|
+| right-to-left (bidi-aware) | words correct, **digit runs reversed** (۱۳۷ read as ۷۳۱) | fully correct |
+| left-to-right (naive) | every word mirrored | every word mirrored, word order flipped too |
+
+So neither engine is right on its own. What ships instead: PyMuPDF reads
+structure; mirrored pages are detected by counting common Persian words against
+their reversals and repaired by un-mirroring; and reversed numbers are repaired
+by cross-checking each run against the other engine, which only rewrites a run
+when the reference holds exactly its reversal. Both fixtures now extract every
+Persian word, `۱۳۷`, `۲٬۴۰۰٬۰۰۰٬۰۰۰` and `۱۴۰۶/۰۱/۱۴` intact.
+
+The word-count detector had to be whole-word: counting substrings let «را» and
+«در» match by accident inside longer words in both directions, so a short
+mirrored line scored zero and went unrepaired.
+
+## Chunk size: what the sweep says, and why the default ignores it
+
+| child tokens | chunks | hit@5 | recall@5 | MRR | nDCG@10 |
+|---:|---:|---:|---:|---:|---:|
+| 180 | 61 | 0.833 | 0.822 | 0.710 | 0.739 |
+| 250 (default) | 32 | 0.833 | 0.830 | 0.729 | 0.759 |
+| 320 | 54 | 0.844 | 0.833 | 0.728 | 0.762 |
+| 400 | 54 | 0.844 | 0.839 | 0.730 | 0.761 |
+| 500 | 50 | 0.867 | 0.856 | 0.749 | 0.778 |
+| 650 | 49 | 0.867 | 0.861 | 0.750 | 0.781 |
+
+(The 320-650 rows were measured before small sections were packed together,
+which is why their chunk counts are higher than the default's.)
+
+Quality rises with chunk size all the way up, and the default stays at 250
+anyway. The reason is that the sweep cannot answer the question it appears to
+answer. The default embedding is feature hashing, a lexical signal: a longer
+chunk contains more terms and therefore matches more questions, without being
+a better retrieval unit. At the limit the winning strategy is one chunk per
+document, which is what the corpus had before this phase and why its hit@5 was
+so high. A semantic embedding behaves the opposite way - a long chunk averages
+several topics into one vector and blurs it - and that is the configuration
+this project is aimed at. Tuning the chunk size on the fallback embedding would
+optimise for the one setup where the answer is "make chunks bigger".
+
+`child_tokens`, `child_overlap_tokens` and `parent_tokens` are settings, so a
+library that stays on feature hashing can raise the first one.
+
+## Token counting
+
+Chunk sizes are in tokens now rather than characters, estimated as four
+characters per token for Latin text and three for Persian, counting spaces.
+It is an estimate, not a tokenizer, and it only has to be stable - every size
+above was chosen by measuring with this counter. A real tokenizer would move
+the numbers a little and none of the conclusions.
+
+## Also in this phase
+
+- Ingestion runs behind the request. A large PDF used to hold the HTTP
+  connection open for its whole extraction and embedding run; the document row
+  now appears immediately as `processing` and `/api/documents/{id}/status`
+  reports progress, warnings and failures.
+- OCR is a hook, not a dependency: a page with no text layer is sent to
+  `tesseract -l fas+eng` when the binary exists, and otherwise produces a
+  warning in the upload status rather than silently indexing nothing. No
+  tesseract binary was available on this machine, so that path is implemented
+  and unmeasured.
+- CSV and DOCX tables serialise one line per row with each cell labelled by its
+  column, so a row survives chunking as a unit.
+- Citations carry a page range and the full section path, both of which exist
+  only now that a chunk can span pages and knows its heading.

@@ -12,3 +12,6 @@ graphify-out/
 
 # evaluation artifacts
 eval/results/
+
+# generated PDF fixtures (rebuilt by `python -m eval.make_fixtures`)
+tests/fixtures/

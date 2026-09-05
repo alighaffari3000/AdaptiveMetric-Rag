@@ -1,4 +1,3 @@
-from app.documents import chunk_blocks
 from app.retrieval import analyze_query, best_evidence, cosine, embed, normalize_query, query_variants
 
 
@@ -43,13 +42,6 @@ def test_embedding_is_deterministic_and_normalized():
     second = embed("CUDA out of memory")
     assert first == second
     assert abs(cosine(first, first) - 1) < 1e-6
-
-
-def test_chunk_overlap():
-    text = "A sentence. " * 300
-    chunks = chunk_blocks([(text, 1, "Intro")], 300, 50)
-    assert len(chunks) > 2
-    assert all(chunk["page"] == 1 for chunk in chunks)
 
 
 def test_evidence_uses_final_answer_to_pick_supporting_sentence():

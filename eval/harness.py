@@ -163,8 +163,7 @@ async def build_corpus(settings, cache: EmbeddingCache | None = None) -> list[di
         ingested = []
         for path in corpus_files():
             ingested.append(
-                await ingest(path.name, "", path.read_bytes(),
-                             settings.chunk_size, settings.chunk_overlap, settings)
+                await ingest(path.name, "", path.read_bytes(), settings)
             )
     finally:
         if cache is not None and cache.enabled:
@@ -180,9 +179,16 @@ def all_chunks() -> list[dict[str, Any]]:
     from app import database
 
     return database.rows(
-        "SELECT c.id,c.content,c.page,c.section,d.name document_name "
+        "SELECT c.id,c.content,c.page,c.section,c.parent_id,d.name document_name "
         "FROM chunks c JOIN documents d ON d.id=c.document_id"
     )
+
+
+def parent_content() -> dict[str, str]:
+    """The window each child belongs to, which is what an answer is written from."""
+    from app import database
+
+    return {row["id"]: row["content"] for row in database.rows("SELECT id,content FROM parents")}
 
 
 def validate_golden(cases: Iterable[GoldenCase]) -> tuple[list[str], list[str]]:
@@ -219,6 +225,22 @@ def validate_golden(cases: Iterable[GoldenCase]) -> tuple[list[str], list[str]]:
 
 def _dcg(gains: list[int]) -> float:
     return sum(gain / math.log2(rank + 1) for rank, gain in enumerate(gains, start=1))
+
+
+def score_delivered(case: GoldenCase, ranked: list[dict[str, Any]], windows: dict[str, str],
+                    k: int = 5) -> float:
+    """Whether the answer is inside the windows the model would actually read.
+
+    The ranking metrics score child chunks, which is the right yardstick for
+    retrieval and the wrong one for the answer: a child is delivered inside its
+    parent window, so a fact one sentence past the child's edge still reaches
+    the model. Reported separately, never mixed into hit@5.
+    """
+    for chunk in ranked[:k]:
+        content = windows.get(chunk.get("parent_id") or "", chunk.get("content", ""))
+        if case.matches({**chunk, "content": content}):
+            return 1.0
+    return 0.0
 
 
 def score_ranking(case: GoldenCase, ranked: list[dict[str, Any]], total_relevant: int,
@@ -269,6 +291,7 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
         "recall@5": mean([o.metrics["recall@5"] for o in answerable]),
         "mrr": mean([o.metrics["mrr"] for o in answerable]),
         "ndcg@10": mean([o.metrics["ndcg@10"] for o in answerable]),
+        "delivered_hit@5": mean([o.metrics["delivered_hit@5"] for o in answerable]),
         "answerable_not_abstained": mean([0.0 if o.abstained else 1.0 for o in answerable]),
         "abstain_accuracy": mean([1.0 if o.abstain_correct else 0.0 for o in abstaining]),
         "latency_p50_ms": pct(latencies, .50),
@@ -283,6 +306,7 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
             "recall@5": mean([o.metrics["recall@5"] for o in tagged]),
             "mrr": mean([o.metrics["mrr"] for o in tagged]),
             "ndcg@10": mean([o.metrics["ndcg@10"] for o in tagged]),
+            "delivered_hit@5": mean([o.metrics["delivered_hit@5"] for o in tagged]),
         }
     return {"summary": summary, "by_tag": by_tag}
 
@@ -320,6 +344,7 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
     depth = max(context_count, settings.rerank_top_n) if settings.rerank_enabled else context_count
 
     chunks = all_chunks()
+    windows = parent_content()
     outcomes: list[CaseOutcome] = []
     for case in cases:
         total_relevant = sum(1 for chunk in chunks if case.matches(chunk))
@@ -357,7 +382,8 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
         outcomes.append(
             CaseOutcome(
                 case=case,
-                metrics=score_ranking(case, ranked, total_relevant),
+                metrics={**score_ranking(case, ranked, total_relevant),
+                         "delivered_hit@5": score_delivered(case, ranked, windows)},
                 abstained=abstained,
                 abstain_correct=(abstained == case.expect_abstain),
                 latency_ms=latency,

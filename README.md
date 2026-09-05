@@ -20,7 +20,13 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 - Multilingual multi-keyword expansion with blended query vectors for cross-language retrieval
 - Three-stage flow: fast candidate selection → adaptive scoring → grounded generation
 - Confidence scoring and early-exit signals
-- PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML ingestion
+- PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML ingestion, with headings kept as a section path
+  and table rows serialised one per line
+- Persian PDFs read in the order they were written: mirrored pages are detected and repaired, and
+  numbers a bidi pass reversed are restored by cross-checking the two PDF engines
+- Parent/child chunking: small chunks are retrieved, the window around them is what the model reads,
+  and a chunk may cross a page break so a fact split by one survives
+- Ingestion runs behind the request, with progress at `/api/documents/{id}/status`
 - Inline citations with source excerpts, page numbers, chunk IDs, and retrieval scores
 - Local no-key extractive mode, Ollama, OpenAI-compatible/dedicated endpoints, and Google Gemini
 - Semantic multilingual embeddings from a local sentence-transformers model, Ollama, an
@@ -136,8 +142,9 @@ API keys submitted through the interface are stored server-side and never return
 |---|---:|---|
 | Candidate pool | 100 | Number of fused dense/BM25 candidates evaluated by the adaptive metric |
 | Context chunks | 5 | Sources passed to the answer provider |
-| Chunk size | 900 | Approximate characters per chunk |
-| Chunk overlap | 140 | Character overlap between adjacent chunks |
+| Child tokens | 250 | Size of the chunks the index scores |
+| Child overlap | 40 | Overlap between adjacent chunks, in tokens |
+| Parent tokens | 900 | Size of the window handed to the answer provider |
 | Semantic signal weight | 0.85 | Share of the ranking the embedding gets when it is semantic |
 | Rerank | Off | Second-stage reranking of the shortlist |
 | Rerank shortlist | 30 | Candidates handed to the reranker |
@@ -151,6 +158,10 @@ API keys submitted through the interface are stored server-side and never return
 | Strict multi-part answers | Off | Treats a short answer to a two-part question as truncated and repairs it |
 
 Chunk settings apply to newly uploaded documents. Re-upload existing documents after changing them.
+Token counts are estimated at four characters per token for Latin text and three for Persian.
+
+Scanned pages are sent to `tesseract -l fas+eng` when that binary is installed; without it the
+upload status carries a warning instead of silently indexing an empty page.
 
 Uploading a file whose contents are already in the library is rejected; delete the
 existing document first to replace it.

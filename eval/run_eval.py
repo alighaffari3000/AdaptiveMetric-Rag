@@ -41,7 +41,7 @@ def to_markdown(report: dict) -> str:
         "| Metric | Value |",
         "|---|---:|",
     ]
-    for key in ("hit@5", "recall@5", "mrr", "ndcg@10", "answerable_not_abstained",
+    for key in ("hit@5", "recall@5", "mrr", "ndcg@10", "delivered_hit@5", "answerable_not_abstained",
                 "abstain_accuracy", "latency_p50_ms", "latency_p95_ms"):
         lines.append(f"| {key} | {_fmt(summary[key])} |")
     lines += ["", "## By tag", "", "| Tag | Cases | hit@5 | recall@5 | MRR | nDCG@10 |", "|---|---:|---:|---:|---:|---:|"]
@@ -72,6 +72,11 @@ async def main_async(args: argparse.Namespace) -> int:
         settings = settings.model_copy(update={"provider": args.provider,
                                                "model": args.model or settings.model,
                                                "api_key": key})
+    if args.child_tokens or args.parent_tokens:
+        settings = settings.model_copy(update={
+            "child_tokens": args.child_tokens or settings.child_tokens,
+            "parent_tokens": args.parent_tokens or settings.parent_tokens,
+        })
     if args.rerank:
         settings = settings.model_copy(update={
             "rerank_enabled": True,
@@ -106,8 +111,9 @@ async def main_async(args: argparse.Namespace) -> int:
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "candidate_count": settings.candidate_count,
-        "chunk_size": settings.chunk_size,
-        "chunk_overlap": settings.chunk_overlap,
+        "child_tokens": settings.child_tokens,
+        "child_overlap_tokens": settings.child_overlap_tokens,
+        "parent_tokens": settings.parent_tokens,
         "context_count_evaluated": args.context,
         "rerank": {"enabled": settings.rerank_enabled, "backend": settings.rerank_backend,
                    "model": settings.rerank_model or settings.model,
@@ -137,7 +143,7 @@ async def main_async(args: argparse.Namespace) -> int:
     print(f"embedding: {settings.embedding_provider} / {settings.embedding_model}"
           f"{f'  (cache: {cache.hits} hits, {cache.misses} new)' if cache.enabled else ''}")
     print()
-    for key in ("hit@5", "recall@5", "mrr", "ndcg@10", "answerable_not_abstained",
+    for key in ("hit@5", "recall@5", "mrr", "ndcg@10", "delivered_hit@5", "answerable_not_abstained",
                 "abstain_accuracy", "latency_p50_ms", "latency_p95_ms"):
         print(f"  {key:<26} {_fmt(summary[key])}")
     print()
@@ -186,6 +192,8 @@ def main() -> int:
     parser.add_argument("--rerank-model", help="model the reranker should use")
     parser.add_argument("--provider", help="override the generation provider (for the llm reranker)")
     parser.add_argument("--model", help="override the generation model")
+    parser.add_argument("--child-tokens", type=int, help="override the child chunk size for this run")
+    parser.add_argument("--parent-tokens", type=int, help="override the parent window size for this run")
     parser.add_argument("--rewrite", choices=["off", "rules", "llm"], default="rules",
                         help="how a case's conversation history is used (default: the offline rewriter)")
     parser.add_argument("--no-cache", action="store_true",

@@ -86,6 +86,54 @@ def language_of(text: str) -> str:
     return "fa" if re.search(r"[؀-ۿ]", text) else "en"
 
 
+# High-frequency Persian words. None of them is a common word when spelled
+# backwards, so counting both spellings tells a correctly extracted page from a
+# mirrored one without needing a dictionary.
+_MIRROR_MARKERS = frozenset({
+    "است", "برای", "این", "که", "های", "شود", "با", "در", "از", "را", "به", "هر", "نیز",
+    "شرکت", "قرارداد", "تاریخ", "سال", "می", "ماه", "روز", "درصد", "ریال", "مبلغ", "شماره",
+    "کل", "بر", "تا", "یک", "دو", "خدمات", "فنی", "مورد", "طرف", "پس", "شده", "کرد",
+})
+# Digits and Latin letters keep their own direction inside a Persian line, so a
+# run of them is reversed back after the line is un-mirrored.
+_DIRECTIONAL_RUN = re.compile(r"[0-9A-Za-z۰-۹٠-٩](?:[0-9A-Za-z۰-۹٠-٩.,:/٫٬%+-]*[0-9A-Za-z۰-۹٠-٩])?")
+
+
+def mirror_score(text: str) -> int:
+    """How much more the text reads backwards than forwards, in marker words.
+
+    Counted as whole words. Substring counting looked simpler and was wrong:
+    «را» and «در» occur by accident inside longer words in both directions, so
+    a short mirrored line scored zero and went unrepaired.
+    """
+    tokens = re.findall(r"[^\W\d_]+", normalize(text), re.UNICODE)
+    forward = sum(1 for token in tokens if token in _MIRROR_MARKERS)
+    backward = sum(1 for token in tokens if token[::-1] in _MIRROR_MARKERS)
+    return backward - forward
+
+
+def looks_mirrored(text: str) -> bool:
+    """Whether a PDF extractor returned Persian text in visual order.
+
+    Persian in a PDF is a sequence of positioned glyphs with no inherent
+    direction. Extractors disagree about who already applied the bidi
+    reordering, and when both do it - or neither - every word comes out
+    spelled backwards: «قرارداد» as «دادرارق». Reading it is impossible and
+    matching it is worse, because the tokens are silently wrong rather than
+    missing.
+    """
+    return language_of(text) == "fa" and mirror_score(text) > 0
+
+
+def unmirror(text: str) -> str:
+    """Undo visual ordering, line by line, keeping numbers and Latin readable."""
+    lines = []
+    for line in text.splitlines():
+        flipped = line[::-1]
+        lines.append(_DIRECTIONAL_RUN.sub(lambda match: match.group(0)[::-1], flipped))
+    return "\n".join(lines)
+
+
 # Grouped forms first, so 2,400,000 is one number rather than three.
 _NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
 

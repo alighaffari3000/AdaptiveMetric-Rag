@@ -3,6 +3,7 @@ uvicorn[standard]==0.35.0
 python-multipart==0.0.20
 httpx==0.28.1
 pypdf==5.9.0
+pymupdf==1.28.2
 python-docx==1.2.0
 beautifulsoup4==4.13.4
 numpy==2.2.4

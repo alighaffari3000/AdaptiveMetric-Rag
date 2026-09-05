@@ -19,8 +19,12 @@ class AppSettings(BaseModel):
     max_tokens: int = Field(900, ge=128, le=8192)
     candidate_count: int = Field(100, ge=10, le=500)
     context_count: int = Field(5, ge=1, le=15)
-    chunk_size: int = Field(900, ge=250, le=3000)
-    chunk_overlap: int = Field(140, ge=0, le=800)
+    # Chunking is measured in tokens, not characters, because that is the unit
+    # the embedding model and the answer's context window are bounded by. The
+    # child is what the index scores; the parent is what the model reads.
+    child_tokens: int = Field(250, ge=60, le=1200)
+    child_overlap_tokens: int = Field(40, ge=0, le=400)
+    parent_tokens: int = Field(900, ge=120, le=4000)
     enable_early_exit: bool = True
     confidence_threshold: float = Field(0.58, ge=0, le=1)
     enable_query_expansion: bool = True
@@ -44,12 +48,20 @@ class AppSettings(BaseModel):
     rerank_top_n: int = Field(30, ge=5, le=100)
     rerank_weight: float = Field(0.7, ge=0, le=1)
 
-    @field_validator("chunk_overlap")
+    @field_validator("child_overlap_tokens")
     @classmethod
     def validate_overlap(cls, value: int, info: Any) -> int:
-        size = info.data.get("chunk_size", 900)
+        size = info.data.get("child_tokens", 250)
         if value >= size:
-            raise ValueError("chunk_overlap must be smaller than chunk_size")
+            raise ValueError("child_overlap_tokens must be smaller than child_tokens")
+        return value
+
+    @field_validator("parent_tokens")
+    @classmethod
+    def validate_parent(cls, value: int, info: Any) -> int:
+        child = info.data.get("child_tokens", 250)
+        if value < child:
+            raise ValueError("parent_tokens must be at least child_tokens")
         return value
 
 
@@ -78,7 +90,10 @@ class Citation(BaseModel):
     document_name: str
     chunk_id: str
     page: int | None = None
+    # A chunk may span a page break now, so where it ends is part of the citation.
+    page_end: int | None = None
     section: str | None = None
+    section_path: str = ""
     excerpt: str
     highlight: str = ""
     score: float
