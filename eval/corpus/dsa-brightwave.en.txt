@@ -1,0 +1,25 @@
+Brightwave Systems — Data Services Agreement (DSA-3390)
+
+1. Parties
+This Data Services Agreement is made between Brightwave Systems Inc, incorporated in Delaware, and Meridian Retail SA, registered in Barcelona, effective 5 September 2025.
+
+2. Scope of Services
+Brightwave Systems provides a customer data platform, identity resolution, and quarterly segmentation reviews for the Meridian Retail marketing organisation. Implementation covers nine national storefronts and two loyalty programmes.
+
+3. Term and Renewal
+The initial term is thirty-six months, ending on 4 September 2028. Renewal is by mutual written agreement only; there is no automatic renewal under this contract.
+
+4. Fees
+The annual platform fee is USD 240,000, billed monthly in arrears at USD 20,000. Professional services are billed separately at USD 185 per hour. Volume overage above 40 million monthly profiles is charged at USD 0.004 per profile.
+
+5. Service Levels
+Brightwave Systems commits to 99.5 percent monthly availability and a four-hour first response for severity-one incidents. Three consecutive months below target allow Meridian Retail to terminate without penalty.
+
+6. Termination
+Either party may terminate for material breach uncured after forty-five days written notice. Meridian Retail may not terminate for convenience during the first eighteen months.
+
+7. Data Protection
+Customer data is stored in the eu-west-1 region. Brightwave Systems deletes all personal data within ninety days of termination and retains only aggregated, non-identifying metrics.
+
+8. Liability
+Aggregate liability is capped at the greater of USD 500,000 or the fees paid in the preceding twelve months. Data protection breaches are excluded from this cap.

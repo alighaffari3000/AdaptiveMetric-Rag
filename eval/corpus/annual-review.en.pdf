@@ -1,0 +1,133 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 1160 >>
+stream
+BT
+/F1 11 Tf
+72 720 Td
+15 TL
+(Kestrel Logistics - Annual Operations Review 2026) Tj
+T*
+() Tj
+T*
+(Section 1. Network summary) Tj
+T*
+() Tj
+T*
+(The European network handled 4.18 million shipments during the reporting) Tj
+T*
+(year, an increase of eleven percent over the previous year. Hamburg) Tj
+T*
+(remained the largest hub with 1.32 million shipments, followed by Rotterdam) Tj
+T*
+(with 0.91 million and Lyon with 0.64 million.) Tj
+T*
+() Tj
+T*
+(Section 2. Forecast accuracy) Tj
+T*
+() Tj
+T*
+(The demand-forecasting platform supplied by Northwind Analytics reached a) Tj
+T*
+(weighted mean absolute percentage error of 8.4 percent across all) Tj
+T*
+(warehouses, against a target of 10 percent. Accuracy was weakest in the) Tj
+T*
+(Lyon region during the second quarter.) Tj
+T*
+() Tj
+T*
+(Section 3. Cold chain incident) Tj
+T*
+() Tj
+T*
+(On 14 August 2026 the refrigeration unit at the Rotterdam cross-dock failed) Tj
+T*
+(during a heat warning. The root cause of the cold chain failure was a) Tj
+T*
+(blocked condenser coil that had been flagged in the June inspection but was) Tj
+T*
+(not scheduled for cleaning, because the maintenance backlog was ranked by) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 7 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 894 >>
+stream
+BT
+/F1 11 Tf
+72 720 Td
+15 TL
+(asset age rather than by inspection severity. Total spoilage was recorded) Tj
+T*
+(at EUR 312,000 and the insurer settled 78 percent of the claim.) Tj
+T*
+() Tj
+T*
+(Section 4. Corrective actions) Tj
+T*
+() Tj
+T*
+(The maintenance backlog is now ranked by inspection severity first and) Tj
+T*
+(asset age second. A second condenser was installed at Rotterdam in October) Tj
+T*
+(2026 to remove the single point of failure.) Tj
+T*
+() Tj
+T*
+(Section 5. Headcount) Tj
+T*
+() Tj
+T*
+(Planning headcount grew from 41 to 47 full-time equivalents. Two roles) Tj
+T*
+(remain open in the Lyon planning team as of 31 December 2026.) Tj
+T*
+() Tj
+T*
+(Section 6. Outlook) Tj
+T*
+() Tj
+T*
+(Volume growth of six to eight percent is expected for 2027, concentrated in) Tj
+T*
+(the Iberian corridor. No additional hub investment is planned before the) Tj
+T*
+(second half of the year.) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000001459 00000 n 
+0000001585 00000 n 
+0000002530 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2627
+%%EOF

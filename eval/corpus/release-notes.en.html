@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Atlas Platform release notes</title></head>
+<body>
+<h1>Atlas Platform release notes</h1>
+
+<h2>Version 7.4.0 — 2026-04-22</h2>
+<p>The scheduler now supports per-tenant concurrency limits. Setting a limit of zero pauses a tenant without deleting its queued jobs. Queued jobs older than fourteen days are discarded during the nightly compaction.</p>
+<p>Breaking change: the deprecated <code>/v1/jobs/submit</code> endpoint was removed. Use <code>/v2/jobs</code>, which requires the tenant identifier in the request body rather than the query string.</p>
+
+<h2>Version 7.3.2 — 2026-03-11</h2>
+<p>Fixed a defect where retry backoff reset after a worker restart, causing failing jobs to retry every second. Backoff state now persists in the job record.</p>
+<p>Fixed incorrect timezone handling in the scheduling calendar for regions observing a half-hour offset.</p>
+
+<h2>Version 7.3.0 — 2026-02-04</h2>
+<p>Added an audit log export in newline-delimited JSON. Exports cover up to ninety days and are capped at two gigabytes per request.</p>
+<p>Worker memory limits are now enforced by the runtime rather than advisory. A worker exceeding its limit is terminated and its job is retried once on a larger instance class.</p>
+
+<h2>Upgrade notes</h2>
+<p>Upgrading from 7.2 or earlier requires running the schema migration before starting new workers. The migration takes roughly four minutes per million job records and can run online.</p>
+</body>
+</html>

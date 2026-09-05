@@ -1,0 +1,25 @@
+Northwind Analytics — Master Service Agreement (MSA-2214)
+
+1. Parties
+This Master Service Agreement is entered into between Northwind Analytics Ltd, registered in Bristol, and Kestrel Logistics GmbH, registered in Hamburg, effective 12 March 2025.
+
+2. Scope of Services
+Northwind Analytics will deliver a hosted demand-forecasting platform, monthly model retraining, and second-line support for the Kestrel Logistics planning team. Onboarding includes data mapping for up to fourteen warehouse locations.
+
+3. Term and Renewal
+The initial term is twenty-four months and ends on 11 March 2027. The agreement renews automatically for successive twelve-month terms unless either party gives written notice of non-renewal at least sixty days before the end of the current term.
+
+4. Fees
+The annual subscription fee is EUR 186,000, invoiced quarterly in advance at EUR 46,500 per quarter. A one-time onboarding fee of EUR 24,000 is payable within thirty days of the effective date. Fees increase by no more than four percent at each renewal.
+
+5. Service Levels
+Northwind Analytics guarantees 99.9 percent monthly availability for the production environment. Critical incidents receive a first response within fifteen minutes. Failure to meet the availability target in any month entitles Kestrel Logistics to a service credit of five percent of the quarterly fee.
+
+6. Termination
+Either party may terminate for material breach if the breach remains uncured thirty days after written notice. Kestrel Logistics may terminate for convenience after the first twelve months with ninety days written notice and payment of an early exit fee equal to one quarterly invoice.
+
+7. Data Protection
+All customer data is processed within the European Economic Area. Northwind Analytics retains operational logs for eighteen months and deletes all customer data within sixty days of termination.
+
+8. Liability
+The aggregate liability of either party under this agreement is limited to the total fees paid in the twelve months preceding the claim. Neither party is liable for indirect or consequential loss.

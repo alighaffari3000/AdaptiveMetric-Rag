@@ -275,3 +275,31 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     confidence = max(0.0, min(1.0, .48 * calibrated_top + .40 * coverage + .12 * separation))
     early = top > .86 and top - second > .20
     return RetrievalResult(selected, analysis, round(confidence, 3), early)
+
+
+def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]]:
+    """Decide whether retrieval produced usable evidence, and which chunks to cite.
+
+    Evidence existence is based on retrieval signals, not the user-facing
+    confidence preference. Raising that preference must never hide known facts.
+    """
+    top_features = result.chunks[0]["features"] if result.chunks else {}
+    browse_intent = result.analysis.intent == "document_browse"
+    semantic_intent = result.analysis.intent in {"conceptual", "causal", "document_browse"}
+    dense_floor = .24 if semantic_intent else .30
+    confidence_floor = .08 if semantic_intent else .24
+    substantive_match = bool(top_features) and (
+        top_features.get("bm25", 0) >= .08
+        or top_features.get("entity", 0) >= .50
+        or top_features.get("dense", 0) >= dense_floor
+        or (result.analysis.intent == "numeric_fact" and top_features.get("numeric", 0) >= .80)
+        or (result.analysis.intent == "temporal_fact" and top_features.get("temporal", 0) >= .80)
+    )
+    evidence_found = bool(result.chunks) and (
+        browse_intent or (result.confidence >= confidence_floor and substantive_match)
+    )
+    if not evidence_found:
+        return False, []
+    citation_floor = max(.10, result.chunks[0]["score"] * .45)
+    grounded = [chunk for chunk in result.chunks if chunk["score"] >= citation_floor]
+    return bool(grounded), grounded

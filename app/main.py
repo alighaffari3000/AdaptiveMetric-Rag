@@ -20,7 +20,7 @@ from .documents import ALLOWED, ingest
 from .embeddings import create_query_embedding, embedding_info, reindex_all
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
-from .retrieval import best_evidence, retrieve
+from .retrieval import best_evidence, retrieve, select_grounded
 
 
 logger = logging.getLogger("adaptive_metric_rag")
@@ -268,27 +268,7 @@ async def chat(request: ChatRequest):
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         raise HTTPException(502, f"Embedding provider error: {exc}") from exc
     result = retrieve(request.message, settings.candidate_count, settings.context_count, request.filters, query_vector)
-    # Evidence existence is based on retrieval signals, not the user-facing
-    # confidence preference. Raising that preference must never hide known facts.
-    top_features = result.chunks[0]["features"] if result.chunks else {}
-    browse_intent = result.analysis.intent == "document_browse"
-    semantic_intent = result.analysis.intent in {"conceptual", "causal", "document_browse"}
-    dense_floor = .24 if semantic_intent else .30
-    confidence_floor = .08 if semantic_intent else .24
-    substantive_match = bool(top_features) and (
-        top_features.get("bm25", 0) >= .08
-        or top_features.get("entity", 0) >= .50
-        or top_features.get("dense", 0) >= dense_floor
-        or (result.analysis.intent == "numeric_fact" and top_features.get("numeric", 0) >= .80)
-        or (result.analysis.intent == "temporal_fact" and top_features.get("temporal", 0) >= .80)
-    )
-    evidence_found = bool(result.chunks) and (browse_intent or (result.confidence >= confidence_floor and substantive_match))
-    grounded_chunks: list[dict] = []
-    if evidence_found:
-        top_score = result.chunks[0]["score"]
-        citation_floor = max(.10, top_score * .45)
-        grounded_chunks = [chunk for chunk in result.chunks if chunk["score"] >= citation_floor]
-        evidence_found = bool(grounded_chunks)
+    evidence_found, grounded_chunks = select_grounded(result)
     if evidence_found:
         try:
             answer = await generate(settings, request.message, grounded_chunks, result.analysis.language)
