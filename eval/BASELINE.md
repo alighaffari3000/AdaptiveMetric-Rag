@@ -90,3 +90,51 @@ cannot show improvement; it exists to catch regressions, not progress.
 `annual-review.en.pdf` have no chunk that can match, because chunking never
 crosses a PDF page break. They score zero until Phase 5 and are marked
 `blocked_by: phase-5` in the golden file.
+
+---
+
+# Phase 1 — index and performance
+
+Recorded 2026-09-05 after replacing the per-query full scan with an in-memory
+index. This phase is deliberately quality-neutral: it changes where the work
+happens, not what is computed.
+
+## Quality: unchanged, as intended
+
+| Metric | Baseline | Phase 1 | Delta |
+|---|---:|---:|---:|
+| hit@5 | 0.800 | 0.800 | 0.000 |
+| recall@5 | 0.794 | 0.794 | 0.000 |
+| MRR | 0.709 | 0.709 | 0.000 |
+| nDCG@10 | 0.736 | 0.736 | 0.000 |
+| abstain_accuracy | 0.125 | 0.125 | 0.000 |
+
+Every per-tag figure is identical too. The BM25 formula is reproduced exactly by
+the inverted index, and dense scoring is the same clamped cosine expressed as a
+matrix product, so scores are bit-for-bit the same.
+
+## Latency: the point of the phase
+
+| Chunks | Baseline mean | Phase 1 mean | Speed-up |
+|---:|---:|---:|---:|
+| 1,000 | 272.7 ms | 6.5 ms | 42x |
+| 5,000 | 1,317.2 ms | 6.9 ms | 191x |
+| 20,000 | 6,556.1 ms | 12.7 ms | 516x |
+
+Golden-set retrieval latency fell from 12.2 ms to 2.4 ms at p50.
+
+Acceptance target was under 50 ms at 20,000 chunks. Met with room to spare, and
+latency now grows sub-linearly: the matrix product is vectorised and the lexical
+pass only touches postings for terms the query actually contains.
+
+## Deviation from the plan
+
+The plan proposed SQLite FTS5 for BM25. An in-process inverted index was used
+instead, for a reason that matters at this point in the sequence: FTS5 has its
+own tokenizer, so it would have changed BM25 scores and made this phase a
+quality change rather than a pure performance change. The inverted index reuses
+the tokens already stored per chunk and reproduces the previous formula exactly,
+which is what let the table above show zeros. The plan's own stated fallback
+("keep the current BM25 but precompute doc_freq and avg_len") pointed the same
+way. FTS5 remains available later, once RRF fusion in Phase 3 makes the exact
+lexical scale irrelevant.

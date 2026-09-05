@@ -5,6 +5,7 @@ import os
 import httpx
 
 from . import database
+from .index import index
 from .models import AppSettings
 from .retrieval import DIMENSION, embed as local_embed, query_variants
 
@@ -95,7 +96,8 @@ async def reindex_all(settings: AppSettings) -> dict:
     )
     with database.connect() as db:
         db.executemany(
-            "UPDATE chunks SET embedding=? WHERE id=?",
-            [(database.json_value(vector), chunk["id"]) for chunk, vector in zip(chunks, vectors)],
+            "UPDATE chunks SET vector=? WHERE id=?",
+            [(database.encode_vector(vector), chunk["id"]) for chunk, vector in zip(chunks, vectors)],
         )
+    index.invalidate()
     return {"chunks": len(chunks), "dimensions": len(vectors[0]) if vectors else None}

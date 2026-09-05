@@ -37,6 +37,7 @@ QUERIES = [
 
 def seed_chunks(count: int) -> None:
     from app import database
+    from app.index import index
     from app.retrieval import embed, tokenize
 
     database.init_db()
@@ -55,13 +56,14 @@ def seed_chunks(count: int) -> None:
             text = " ".join(words) + f" شماره {rng.randint(1, 999)} سال {rng.randint(1395, 1405)}."
             rows.append((
                 uuid.uuid4().hex, document_id, position, 1, None, text,
-                database.json_value(embed(text)), database.json_value(tokenize(text)), "{}",
+                database.encode_vector(embed(text)), database.json_value(tokenize(text)), "{}",
             ))
         db.executemany(
-            "INSERT INTO chunks(id,document_id,position,page,section,content,embedding,tokens,metadata) "
+            "INSERT INTO chunks(id,document_id,position,page,section,content,vector,tokens,metadata) "
             "VALUES(?,?,?,?,?,?,?,?,?)",
             rows,
         )
+    index.reload()
 
 
 def measure(size: int, repeats: int) -> dict:
@@ -69,9 +71,10 @@ def measure(size: int, repeats: int) -> dict:
 
     seed_chunks(size)
     retrieve(QUERIES[0])  # warm caches
+
     timings: list[float] = []
-    for index in range(repeats * len(QUERIES)):
-        query = QUERIES[index % len(QUERIES)]
+    for position in range(repeats * len(QUERIES)):
+        query = QUERIES[position % len(QUERIES)]
         started = time.perf_counter()
         retrieve(query)
         timings.append((time.perf_counter() - started) * 1000)

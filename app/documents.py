@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import json
@@ -14,6 +15,7 @@ from pypdf import PdfReader
 
 from . import database
 from .embeddings import create_embeddings, document_embedding_text
+from .index import index
 from .models import AppSettings
 from .retrieval import tokenize
 
@@ -76,7 +78,8 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
 async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: int, overlap: int,
                  settings: AppSettings) -> dict:
     doc_id = uuid.uuid4().hex
-    pieces = chunk_blocks(extract(filename, payload), chunk_size, overlap)
+    # Parsing and chunking are CPU bound; keep them out of the event loop.
+    pieces = await asyncio.to_thread(lambda: chunk_blocks(extract(filename, payload), chunk_size, overlap))
     vectors = await create_embeddings(
         settings,
         [document_embedding_text(filename, piece.get("section"), piece["content"]) for piece in pieces],
@@ -90,8 +93,9 @@ async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: i
         for position, (piece, vector) in enumerate(zip(pieces, vectors)):
             text = piece["content"]
             db.execute(
-                "INSERT INTO chunks(id,document_id,position,page,section,content,embedding,tokens,metadata) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO chunks(id,document_id,position,page,section,content,vector,tokens,metadata) VALUES(?,?,?,?,?,?,?,?,?)",
                 (uuid.uuid4().hex, doc_id, position, piece["page"], piece["section"], text,
-                 database.json_value(vector), database.json_value(tokenize(text)), "{}"),
+                 database.encode_vector(vector), database.json_value(tokenize(text)), "{}"),
             )
+    index.invalidate()
     return {"id": doc_id, "name": filename, "type": content_type, "size": len(payload), "chunks": len(pieces), "created_at": now}

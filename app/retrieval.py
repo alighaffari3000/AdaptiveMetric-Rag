@@ -8,7 +8,9 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from . import database
+import numpy as np
+
+from .index import index
 from .models import QueryAnalysis
 
 
@@ -216,46 +218,46 @@ class RetrievalResult:
 def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, filters: dict[str, Any] | None = None,
              query_vector: list[float] | None = None) -> RetrievalResult:
     analysis = analyze_query(query)
-    all_chunks = database.rows(
-        "SELECT c.*, d.name document_name, d.type document_type FROM chunks c JOIN documents d ON d.id=c.document_id"
-    )
-    if filters and filters.get("document_id"):
-        all_chunks = [c for c in all_chunks if c["document_id"] == filters["document_id"]]
-    if not all_chunks:
+    snapshot = index.snapshot()
+    if not snapshot.size:
         return RetrievalResult([], analysis, 0.0, False)
 
-    qvec, qtokens = query_vector or embed(query), analysis.keywords
-    prepared: list[tuple[dict[str, Any], list[str], float]] = []
-    for chunk in all_chunks:
-        vector = json.loads(chunk["embedding"])
-        prepared.append((chunk, json.loads(chunk["tokens"]), cosine(qvec, vector)))
-    # First-stage hybrid retrieval: union strong dense and lexical candidates.
-    # This exact scan is intentionally replaceable by FAISS/Qdrant at large scale.
-    avg_len = sum(len(tokens) for _, tokens, _ in prepared) / len(prepared)
-    doc_freq: Counter[str] = Counter()
-    for _, tokens, _ in prepared:
-        doc_freq.update(set(tokens))
-    bm_by_id = {
-        chunk["id"]: _bm25(qtokens, tokens, avg_len, doc_freq, len(prepared))
-        for chunk, tokens, _ in prepared
-    }
-    dense_ranked = sorted(prepared, key=lambda x: x[2], reverse=True)
-    lexical_ranked = sorted(prepared, key=lambda x: bm_by_id[x[0]["id"]], reverse=True)
+    document_id = (filters or {}).get("document_id")
+    if document_id:
+        subset = np.fromiter(
+            (i for i, row in enumerate(snapshot.rows) if row["document_id"] == document_id),
+            dtype=np.int64,
+        )
+        if not subset.size:
+            return RetrievalResult([], analysis, 0.0, False)
+    else:
+        subset = None
+
+    qvec = np.asarray(query_vector if query_vector is not None else embed(query), dtype=np.float32)
+    qtokens = analysis.keywords
+
+    dense = snapshot.dense_scores(qvec)
+    lexical = snapshot.bm25_scores(qtokens, subset)
+    universe = subset if subset is not None else np.arange(snapshot.size, dtype=np.int64)
+
+    # First-stage hybrid retrieval: union of the strongest dense and lexical
+    # candidates. Ranking ties keep corpus order, matching the previous scorer.
     dense_limit = max(1, round(candidate_count * .65))
     lexical_limit = max(1, candidate_count - dense_limit)
-    candidate_ids = {item[0]["id"] for item in dense_ranked[:dense_limit]}
-    candidate_ids.update(item[0]["id"] for item in lexical_ranked[:lexical_limit])
-    candidates = [item for item in prepared if item[0]["id"] in candidate_ids]
-    bm_values = [bm_by_id[chunk["id"]] for chunk, _, _ in candidates]
-    bm_max = max(bm_values, default=1) or 1
+    dense_ranked = universe[np.argsort(-dense[universe], kind="stable")][:dense_limit]
+    lexical_ranked = universe[np.argsort(-lexical[universe], kind="stable")][:lexical_limit]
+    candidate_set = set(dense_ranked.tolist()) | set(lexical_ranked.tolist())
+    candidates = [position for position in universe.tolist() if position in candidate_set]
 
+    bm_max = max((lexical[position] for position in candidates), default=1) or 1
     scored: list[dict[str, Any]] = []
-    for (chunk, tokens, dense_score), bm in zip(candidates, bm_values):
-        content = chunk["content"]
-        metadata_text = f'{chunk.get("document_name", "")} {chunk.get("section") or ""} {chunk.get("document_type", "")}'
+    for position in candidates:
+        row = snapshot.rows[position]
+        content = row["content"]
+        metadata_text = f'{row.get("document_name", "")} {row.get("section") or ""} {row.get("document_type", "")}'
         features = {
-            "dense": dense_score,
-            "bm25": bm / bm_max,
+            "dense": float(dense[position]),
+            "bm25": float(lexical[position] / bm_max),
             "keyword": _multi_keyword_signal(analysis.keywords, content + " " + metadata_text),
             "entity": _overlap(analysis.entities, content),
             "numeric": _numeric_signal(analysis.numbers, content, analysis.intent == "numeric_fact"),
@@ -263,8 +265,10 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
             "metadata": _overlap(qtokens[:6], metadata_text),
         }
         final = sum(analysis.weights[key] * value for key, value in features.items())
+        chunk = dict(row)
         chunk.update(score=round(final, 6), features={k: round(v, 4) for k, v in features.items()})
         scored.append(chunk)
+
     scored.sort(key=lambda item: item["score"], reverse=True)
     selected = scored[:context_count]
     top = selected[0]["score"] if selected else 0.0

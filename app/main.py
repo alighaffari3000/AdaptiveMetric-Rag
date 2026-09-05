@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from . import database
 from .documents import ALLOWED, ingest
 from .embeddings import create_query_embedding, embedding_info, reindex_all
+from .index import index as chunk_index
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence, retrieve, select_grounded
@@ -26,8 +28,15 @@ from .retrieval import best_evidence, retrieve, select_grounded
 logger = logging.getLogger("adaptive_metric_rag")
 
 
+CITATION_REFRESH_KEY = "citation_highlights_refreshed_at"
+
+
 def refresh_saved_citation_highlights() -> None:
-    """Upgrade saved conversations to the current answer-aware evidence selector."""
+    """Upgrade saved conversations to the current answer-aware evidence selector.
+
+    This is a one-shot migration, not startup work. It used to rewrite the whole
+    message history on every boot, which grew slower with every conversation.
+    """
     messages = database.rows(
         "SELECT id,conversation_id,role,content,citations FROM messages ORDER BY conversation_id,created_at"
     )
@@ -55,7 +64,10 @@ def refresh_saved_citation_highlights() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.init_db()
-    refresh_saved_citation_highlights()
+    if not database.meta_get(CITATION_REFRESH_KEY):
+        await asyncio.to_thread(refresh_saved_citation_highlights)
+        database.meta_set(CITATION_REFRESH_KEY, datetime.now(timezone.utc).isoformat())
+    await asyncio.to_thread(chunk_index.reload)
     yield
 
 
@@ -120,10 +132,10 @@ async def health():
 @app.get("/api/system/info")
 async def system_info():
     info = embedding_info(load_settings())
-    first_chunk = database.row("SELECT embedding FROM chunks LIMIT 1")
-    if first_chunk:
-        info["dimensions"] = len(json.loads(first_chunk["embedding"]))
-    return {"embedding": info}
+    snapshot = chunk_index.snapshot()
+    if snapshot.size:
+        info["dimensions"] = int(snapshot.matrix.shape[1])
+    return {"embedding": info, "index": {"chunks": snapshot.size, "stale_vectors": snapshot.stale_vectors}}
 
 
 @app.get("/api/settings", response_model=SettingsView)
@@ -233,7 +245,8 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(413, "Maximum file size is 30 MB")
     try:
         settings = load_settings()
-        return await ingest(file.filename or "document", file.content_type or "", payload, settings.chunk_size, settings.chunk_overlap, settings)
+        return await ingest(file.filename or "document", file.content_type or "", payload,
+                            settings.chunk_size, settings.chunk_overlap, settings)
     except Exception as exc:
         raise HTTPException(400, f"Could not process document: {exc}") from exc
 
@@ -244,6 +257,7 @@ async def delete_document(document_id: str):
     if not found:
         raise HTTPException(404, "Document not found")
     database.execute("DELETE FROM documents WHERE id=?", (document_id,))
+    chunk_index.invalidate()
     return {"ok": True}
 
 
@@ -267,7 +281,9 @@ async def chat(request: ChatRequest):
         query_vector = await create_query_embedding(settings, request.message)
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         raise HTTPException(502, f"Embedding provider error: {exc}") from exc
-    result = retrieve(request.message, settings.candidate_count, settings.context_count, request.filters, query_vector)
+    result = await asyncio.to_thread(
+        retrieve, request.message, settings.candidate_count, settings.context_count, request.filters, query_vector
+    )
     evidence_found, grounded_chunks = select_grounded(result)
     if evidence_found:
         try:
