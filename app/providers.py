@@ -7,9 +7,24 @@ from typing import Any
 import httpx
 
 from .models import AppSettings
+from .net import post_with_retry, redact
 
 
 logger = logging.getLogger("adaptive_metric_rag.providers")
+
+
+class ProviderError(RuntimeError):
+    """A provider call failed, with the API key stripped from the message."""
+
+    def __init__(self, message: str):
+        super().__init__(redact(message))
+
+
+def raise_for_status(response: httpx.Response, what: str) -> None:
+    if response.is_success:
+        return
+    detail = response.text[:300] if response.text else ""
+    raise ProviderError(f"{what} failed with HTTP {response.status_code}: {redact(detail)}")
 
 
 def _has_complete_ending(answer: str) -> bool:
@@ -215,3 +230,53 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
                 answer = repair.json()["candidates"][0]["content"]["parts"][0]["text"]
             return _finalize_answer(answer)
     raise ValueError(f"Unknown provider: {settings.provider}")
+
+
+async def complete(settings: AppSettings, system: str, user: str, model: str = "",
+                   temperature: float = 0.0, max_tokens: int = 1024) -> str:
+    """One plain completion against the configured provider.
+
+    Used by stages that need the model to do something other than answer the
+    user, such as scoring a shortlist for reranking. Kept separate from
+    `generate` so the answer path keeps its repair and continuation behaviour
+    and this one stays predictable.
+    """
+    model = model or settings.model
+    timeout = httpx.Timeout(90.0, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        if settings.provider == "ollama":
+            base = (settings.base_url or "http://host.docker.internal:11434").rstrip("/")
+            response = await post_with_retry(client, f"{base}/api/chat", what="Ollama completion", json={
+                "model": model, "stream": False, "think": False,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "options": {"temperature": temperature, "num_predict": max_tokens},
+            })
+            raise_for_status(response, "Ollama completion")
+            return response.json()["message"]["content"]
+        if settings.provider == "openai":
+            base = (settings.base_url or "https://api.openai.com/v1").rstrip("/")
+            response = await post_with_retry(
+                client, f"{base}/chat/completions",
+                what="OpenAI completion",
+                headers={"Authorization": f"Bearer {settings.api_key}"},
+                json={"model": model, "temperature": temperature, "max_tokens": max_tokens,
+                      "messages": [{"role": "system", "content": system},
+                                   {"role": "user", "content": user}]},
+            )
+            raise_for_status(response, "OpenAI completion")
+            return response.json()["choices"][0]["message"]["content"]
+        if settings.provider == "gemini":
+            base = (settings.base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+            response = await post_with_retry(
+                client, f"{base}/models/{model}:generateContent",
+                what=f"Gemini completion with model '{model}'",
+                params={"key": settings.api_key},
+                json={"system_instruction": {"parts": [{"text": system}]},
+                      "contents": [{"role": "user", "parts": [{"text": user}]}],
+                      "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}},
+            )
+            raise_for_status(response, f"Gemini completion with model '{model}'")
+            parts = response.json()["candidates"][0]["content"]["parts"]
+            return "".join(part.get("text", "") for part in parts)
+    raise ValueError(f"Provider {settings.provider} cannot run a plain completion")
+

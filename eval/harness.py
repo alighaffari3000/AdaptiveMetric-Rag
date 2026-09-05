@@ -7,6 +7,7 @@ keeps working when chunking, embeddings, or ranking change in later phases.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -23,6 +24,50 @@ from .normalize import normalize
 EVAL_DIR = Path(__file__).resolve().parent
 CORPUS_DIR = EVAL_DIR / "corpus"
 GOLDEN_PATH = EVAL_DIR / "golden.jsonl"
+CACHE_DIR = EVAL_DIR / "results" / "embedding-cache"
+
+
+class EmbeddingCache:
+    """Persist embeddings between runs so tuning does not re-pay for API calls.
+
+    Keyed by provider, model, task kind and the exact text, so a cache entry can
+    never be served for a different model or a different query.
+    """
+
+    def __init__(self, settings, enabled: bool = True):
+        self.enabled = enabled
+        self.hits = 0
+        self.misses = 0
+        slug = f"{settings.embedding_provider}--{settings.embedding_model}".replace("/", "_").replace(":", "_")
+        self.path = CACHE_DIR / f"{slug}.json"
+        self.store: dict[str, list[float]] = {}
+        if self.enabled and self.path.exists():
+            self.store = json.loads(self.path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _key(kind: str, text: str) -> str:
+        return f"{kind}:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+
+    async def embed(self, settings, texts: list[str], kind: str = "document") -> list[list[float]]:
+        from app.embeddings import create_embeddings
+
+        if not self.enabled:
+            return await create_embeddings(settings, texts, kind=kind)
+        keys = [self._key(kind, text) for text in texts]
+        missing = [text for text, key in zip(texts, keys) if key not in self.store]
+        if missing:
+            fresh = await create_embeddings(settings, missing, kind=kind)
+            for text, vector in zip(missing, fresh):
+                self.store[self._key(kind, text)] = vector
+            self.misses += len(missing)
+        self.hits += len(texts) - len(missing)
+        return [self.store[key] for key in keys]
+
+    def save(self) -> None:
+        if not self.enabled or not self.store:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.store), encoding="utf-8")
 
 
 def use_scratch_data_dir() -> Path:
@@ -93,7 +138,7 @@ def corpus_files() -> list[Path]:
     return sorted(p for p in CORPUS_DIR.iterdir() if p.is_file() and not p.name.startswith("."))
 
 
-async def build_corpus(settings) -> list[dict[str, Any]]:
+async def build_corpus(settings, cache: EmbeddingCache | None = None) -> list[dict[str, Any]]:
     """Ingest every corpus file into the (scratch) database."""
     from app import database
     from app.documents import ingest
@@ -106,11 +151,29 @@ async def build_corpus(settings) -> list[dict[str, Any]]:
 
     database.init_db()
     database.execute("DELETE FROM documents")
-    ingested = []
-    for path in corpus_files():
-        ingested.append(
-            await ingest(path.name, "", path.read_bytes(), settings.chunk_size, settings.chunk_overlap, settings)
-        )
+    if cache is not None and cache.enabled:
+        import app.documents as documents_module
+
+        original = documents_module.create_embeddings
+
+        async def cached(settings_, texts, kind="document"):
+            return await cache.embed(settings_, texts, kind=kind)
+
+        documents_module.create_embeddings = cached
+    try:
+        ingested = []
+        for path in corpus_files():
+            ingested.append(
+                await ingest(path.name, "", path.read_bytes(),
+                             settings.chunk_size, settings.chunk_overlap, settings)
+            )
+    finally:
+        if cache is not None and cache.enabled:
+            documents_module.create_embeddings = original
+            cache.save()
+    from app.index import index as chunk_index
+
+    chunk_index.invalidate()
     return ingested
 
 
@@ -226,37 +289,65 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
 
 
 async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | None = None,
-                    context_count: int = 10) -> list[CaseOutcome]:
-    from app.embeddings import create_query_embedding
-    from app.retrieval import retrieve, select_grounded
+                    context_count: int = 10, cache: EmbeddingCache | None = None) -> list[CaseOutcome]:
+    """Score the full pipeline: embed, fuse, rerank when enabled, and gate."""
+    from app.embeddings import create_query_embedding, is_semantic
+    from app.rerank import RerankUnavailable, blend, rerank_scores
+    from app.retrieval import retrieve, score_confidence, select_grounded, RetrievalResult
+
+    async def embed_query(question: str) -> list[float]:
+        if cache is not None and cache.enabled and is_semantic(settings):
+            return (await cache.embed(settings, [question], kind="query"))[0]
+        return await create_query_embedding(settings, question)
+
+    scoring_settings = settings.model_copy(update={"context_count": context_count})
+    semantic = is_semantic(settings)
+    dense_weight = settings.semantic_dense_weight if semantic else None
+    fusion = "rank" if semantic else "linear"
+    depth = max(context_count, settings.rerank_top_n) if settings.rerank_enabled else context_count
 
     chunks = all_chunks()
     outcomes: list[CaseOutcome] = []
     for case in cases:
         total_relevant = sum(1 for chunk in chunks if case.matches(chunk))
         started = time.perf_counter()
-        vector = await create_query_embedding(settings, case.question)
-        result = retrieve(
-            case.question,
-            candidate_count or settings.candidate_count,
-            context_count,
-            None,
-            vector,
-        )
+        vector = await embed_query(case.question)
+        result = retrieve(case.question, candidate_count or settings.candidate_count, depth,
+                          None, vector, dense_weight, fusion)
+        ranked = result.chunks
+        confidence = result.confidence
+        if settings.rerank_enabled and len(ranked) > 1:
+            shortlist = ranked[:settings.rerank_top_n]
+            try:
+                scores = await rerank_scores(settings, case.question, shortlist)
+                ranked = blend(shortlist, scores, settings.rerank_weight) + ranked[settings.rerank_top_n:]
+                confidence = score_confidence(ranked[:context_count],
+                                              result.analysis.query_tokens or result.analysis.keywords,
+                                              result.standout)
+            except Exception as exc:
+                # A silently skipped reranker would be reported as a measurement
+                # of reranking, which it is not.
+                raise RuntimeError(
+                    f"reranking failed on case {case.id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
         latency = (time.perf_counter() - started) * 1000
-        evidence_found, _ = select_grounded(result)
+        ranked = ranked[:context_count]
+        gated = RetrievalResult(ranked, result.analysis, confidence, result.early_exit, result.standout)
+        evidence_found, _ = select_grounded(gated)
         abstained = not evidence_found
         outcomes.append(
             CaseOutcome(
                 case=case,
-                metrics=score_ranking(case, result.chunks, total_relevant),
+                metrics=score_ranking(case, ranked, total_relevant),
                 abstained=abstained,
                 abstain_correct=(abstained == case.expect_abstain),
                 latency_ms=latency,
-                top_document=result.chunks[0]["document_name"] if result.chunks else "",
+                top_document=ranked[0]["document_name"] if ranked else "",
                 total_relevant=total_relevant,
             )
         )
+    if cache is not None:
+        cache.save()
     return outcomes
 
 

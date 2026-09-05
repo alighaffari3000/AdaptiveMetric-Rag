@@ -213,3 +213,104 @@ carried into Phase 3 rather than declared met here.
   connection previously aborted an entire upload or re-index.
 - Uploading a file already in the library is rejected by SHA-256 content digest
   instead of silently creating a second copy of every chunk.
+
+---
+
+# Phase 3 — rank fusion and reranking
+
+Recorded 2026-09-05.
+
+## What changed
+
+**Fusion follows the signal.** The weighted sum survives for the feature-hashing
+default, where its hand-tuned weights still measure better than rank fusion;
+rank fusion is used whenever the embedding is semantic. The fusion method should
+match the nature of the signals, and rank fusion hands a meaningless dense score
+a fairer share of the vote than it deserves.
+
+**The dense weight follows the embedding.** With a semantic model the dense
+signal is raised to `semantic_dense_weight` (default 0.85) and the remaining
+share is distributed among the other signals in their original intent
+proportions, so the adaptive idea survives while the strongest signal leads.
+
+## Results with a semantic embedding (gemini-embedding-001, no reranker)
+
+| Metric | Baseline | Phase 2 | Phase 3 | vs baseline |
+|---|---:|---:|---:|---:|
+| hit@5 | 0.800 | 0.844 | **0.956** | +0.156 |
+| recall@5 | 0.794 | 0.833 | **0.944** | +0.150 |
+| MRR | 0.709 | 0.735 | **0.775** | +0.066 |
+| nDCG@10 | 0.736 | 0.767 | **0.818** | +0.082 |
+| cross_lingual hit@5 | 0.400 | 0.533 | **0.933** | +0.533 |
+| fa2en hit@5 | 0.300 | 0.400 | **0.900** | +0.600 |
+| en2fa hit@5 | 0.600 | 0.800 | **1.000** | +0.400 |
+| conceptual hit@5 | 0.571 | 0.571 | **1.000** | +0.429 |
+| numeric hit@5 | 0.742 | 0.806 | **0.968** | +0.226 |
+
+The acceptance criteria carried over from Phase 2 are now met: cross-lingual
+recall is 0.900 against a target of 0.6, and overall recall is 15.0 points above
+the baseline.
+
+## The default configuration is unchanged
+
+With feature-hashing embeddings the app keeps the weighted sum, and every metric
+is identical to the baseline: hit@5 0.800, recall@5 0.794, MRR 0.709, nDCG@10
+0.736. Nobody sees a regression; the gain is available to anyone who selects a
+semantic model.
+
+## Reranking
+
+Verified on the 15-case cross-lingual slice with `gemini-3.5-flash-lite`:
+
+| Metric | Fusion only | Fusion + LLM rerank |
+|---|---:|---:|
+| hit@5 | 0.933 | **1.000** |
+| recall@5 | 0.900 | **0.967** |
+| MRR | 0.805 | **1.000** |
+| nDCG@10 | 0.841 | **0.981** |
+
+Reranking put the right chunk first on every case in that slice. The full
+98-case reranked run could not be completed: the daily quota on the Gemini key
+was exhausted partway through, so **the whole-set reranked figures are not
+measured**. Reranking is off by default and costs one model call per question.
+
+Phase 3's acceptance criterion was nDCG@10 ten points above Phase 2. Fusion
+alone delivers 5.1 points. The cross-lingual slice suggests reranking covers the
+rest, but that is an inference from a slice, not a measurement of the whole set.
+
+## Confidence, recalibrated
+
+The fused score cannot carry confidence. Rank fusion puts the best chunk at or
+near 1.0 for almost every query, answerable or not. Measured on the golden set,
+the top fused score had a median of 0.999 for answerable questions and 0.998 for
+unanswerable ones.
+
+Confidence is now `0.55 * relevance + 0.45 * coverage`, where relevance is the
+reranker's verdict on the top chunk when a reranker ran, and otherwise how many
+standard deviations the best chunk's raw similarity sits above the corpus mean.
+That statistic does not depend on the embedding model's own scale, which a fixed
+cosine threshold would.
+
+## Abstention is still weak, and this is why
+
+Abstention accuracy stays at 0.125. The measured trade-off is bad: the best
+threshold found catches 88 percent of unanswerable questions but refuses 22
+percent of answerable ones, which is a worse product than answering the eight.
+Two honest reasons not to tune further here:
+
+- Eight negative cases cannot support a fitted threshold. Any gain would be a
+  measurement of those eight questions, not of the system.
+- The signal that actually separates the two is a reranker judging whether a
+  passage answers the question, and reranking is off by default.
+
+Fixing this properly needs many more labelled negatives and a gate that reads
+the rerank score. It is left open rather than tuned into a number that looks
+better on this page.
+
+## A note on the RRF constant
+
+`RRF_K` is 60, the conventional value. A sweep over 10, 30 and 60 produced
+identical metrics on this corpus: with 31 chunks the rank differences are small
+either way, and the ranking is driven by which signals vote rather than by fine
+rank positions. The constant would start to matter on a corpus large enough to
+produce long candidate lists.

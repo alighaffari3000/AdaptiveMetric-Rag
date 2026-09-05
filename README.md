@@ -9,7 +9,9 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 ## What is included
 
 - Adaptive query analyzer with factual, conceptual, causal, numeric, temporal, and technical/code intents
-- Per-query mixture of dense, BM25, entity, numeric, temporal, and metadata scores
+- Per-query mixture of dense, BM25, entity, numeric, temporal, and metadata signals,
+  fused by rank so no signal wins on the scale it happens to use
+- Optional second-stage reranking by a local cross-encoder or by the answer model
 - Multilingual multi-keyword expansion with blended query vectors for cross-language retrieval
 - Three-stage flow: fast candidate selection → adaptive scoring → grounded generation
 - Confidence scoring and early-exit signals
@@ -34,7 +36,9 @@ Query → Query Analyzer → Metric Router
                             │
                     Candidate pool (10–500)
                             │
-                  Adaptive metric scoring
+              Adaptive fusion of the ranked signals
+                            │
+             Cross-encoder or LLM rerank (optional)
                             │
               Confidence / early-exit decision
                             │
@@ -129,6 +133,10 @@ API keys submitted through the interface are stored server-side and never return
 | Context chunks | 5 | Sources passed to the answer provider |
 | Chunk size | 900 | Approximate characters per chunk |
 | Chunk overlap | 140 | Character overlap between adjacent chunks |
+| Semantic signal weight | 0.85 | Share of the ranking the embedding gets when it is semantic |
+| Rerank | Off | Second-stage reranking of the shortlist |
+| Rerank shortlist | 30 | Candidates handed to the reranker |
+| Rerank weight | 0.7 | Share of the final score from the reranker; the rest is the fusion score |
 | Confidence threshold | 0.58 | Threshold exposed for confidence-aware flows |
 | Early exit | On | Marks decisive retrievals so expensive optional stages can be skipped |
 | Query expansion | On | Enables expansion behavior in confidence-aware extensions |

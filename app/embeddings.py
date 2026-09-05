@@ -4,7 +4,6 @@ import asyncio
 import logging
 import math
 import os
-import random
 import threading
 from typing import Any, Literal
 
@@ -12,6 +11,7 @@ import httpx
 
 from . import database
 from .index import index
+from .net import post_with_retry
 from .models import AppSettings
 from .retrieval import DIMENSION, embed as local_embed, query_variants
 
@@ -34,39 +34,6 @@ DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_ST_MODEL = "intfloat/multilingual-e5-small"
 GEMINI_DIMENSIONS = 768
 BATCH_SIZE = 32
-
-
-RETRY_ATTEMPTS = 4
-RETRY_BASE_DELAY = 0.75
-RETRY_MAX_DELAY = 8.0
-RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
-
-
-async def _post_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> httpx.Response:
-    """Retry transient network and rate-limit failures.
-
-    Embedding a document is one call per batch of 32 chunks, so a single dropped
-    connection would otherwise abort an entire upload or re-index.
-    """
-    last: Exception | None = None
-    for attempt in range(RETRY_ATTEMPTS):
-        try:
-            response = await client.post(url, **kwargs)
-            if response.status_code in RETRYABLE_STATUS and attempt < RETRY_ATTEMPTS - 1:
-                raise httpx.HTTPStatusError(
-                    f"retryable status {response.status_code}", request=response.request, response=response
-                )
-            return response
-        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
-            last = exc
-            if attempt == RETRY_ATTEMPTS - 1:
-                break
-            delay = min(RETRY_MAX_DELAY, RETRY_BASE_DELAY * (2 ** attempt))
-            delay += random.uniform(0, 0.4) if delay else 0
-            logger.warning("embedding request failed (%s); retrying in %.1fs", type(exc).__name__, delay)
-            await asyncio.sleep(delay)
-    assert last is not None
-    raise last
 
 
 def _normalize(vector: list[float]) -> list[float]:
@@ -167,12 +134,12 @@ async def _embed_ollama(settings: AppSettings, texts: list[str], client: httpx.A
     vectors: list[list[float]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start:start + BATCH_SIZE]
-        response = await _post_with_retry(client, f"{base_url}/api/embed",
+        response = await post_with_retry(client, f"{base_url}/api/embed",
                                           json={"model": settings.embedding_model, "input": batch})
         if response.status_code == 404:
             # Compatibility with older Ollama releases.
             for text in batch:
-                legacy = await _post_with_retry(client, f"{base_url}/api/embeddings",
+                legacy = await post_with_retry(client, f"{base_url}/api/embeddings",
                                                 json={"model": settings.embedding_model, "prompt": text})
                 legacy.raise_for_status()
                 vectors.append(_normalize(legacy.json()["embedding"]))
@@ -194,7 +161,7 @@ async def _embed_openai(settings: AppSettings, texts: list[str], client: httpx.A
     vectors: list[list[float]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start:start + BATCH_SIZE]
-        response = await _post_with_retry(
+        response = await post_with_retry(
             client,
             f"{base_url}/embeddings",
             headers={"Authorization": f"Bearer {api_key}"},
@@ -220,7 +187,7 @@ async def _embed_gemini(settings: AppSettings, texts: list[str], kind: TextKind,
     vectors: list[list[float]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start:start + BATCH_SIZE]
-        response = await _post_with_retry(
+        response = await post_with_retry(
             client,
             f"{base_url}/{qualified}:batchEmbedContents",
             params={"key": api_key},

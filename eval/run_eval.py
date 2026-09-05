@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from .harness import (
+    EmbeddingCache,
     aggregate,
     build_corpus,
     cleanup,
@@ -64,6 +65,19 @@ async def main_async(args: argparse.Namespace) -> int:
             "embedding_model": args.embedding_model or settings.embedding_model,
             "embedding_base_url": args.embedding_base_url or "",
         })
+    if args.provider:
+        import os
+
+        key = settings.api_key or os.getenv(f"{args.provider.upper()}_API_KEY", "")
+        settings = settings.model_copy(update={"provider": args.provider,
+                                               "model": args.model or settings.model,
+                                               "api_key": key})
+    if args.rerank:
+        settings = settings.model_copy(update={
+            "rerank_enabled": True,
+            "rerank_backend": args.rerank,
+            "rerank_model": args.rerank_model or "",
+        })
     cases = load_golden()
     if args.tag:
         cases = [case for case in cases if args.tag in case.tags]
@@ -71,7 +85,8 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"no golden case carries tag {args.tag!r}")
             return 2
 
-    documents = await build_corpus(settings)
+    cache = EmbeddingCache(settings, enabled=not args.no_cache)
+    documents = await build_corpus(settings, cache)
     problems, blocked = validate_golden(cases)
     if problems:
         print("golden set is inconsistent with the corpus:")
@@ -84,7 +99,7 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"  - {item}")
         print()
 
-    outcomes = await run_cases(cases, settings, context_count=args.context)
+    outcomes = await run_cases(cases, settings, context_count=args.context, cache=cache)
     report = aggregate(outcomes)
     report["runtime"] = {
         "embedding_provider": settings.embedding_provider,
@@ -93,6 +108,10 @@ async def main_async(args: argparse.Namespace) -> int:
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
         "context_count_evaluated": args.context,
+        "rerank": {"enabled": settings.rerank_enabled, "backend": settings.rerank_backend,
+                   "model": settings.rerank_model or settings.model,
+                   "top_n": settings.rerank_top_n, "weight": settings.rerank_weight}
+        if settings.rerank_enabled else None,
         "documents": len(documents),
         "chunks": sum(doc["chunks"] for doc in documents),
     }
@@ -113,7 +132,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
     summary = report["summary"]
     print(f"corpus: {report['runtime']['documents']} documents, {report['runtime']['chunks']} chunks")
-    print(f"embedding: {settings.embedding_provider} / {settings.embedding_model}")
+    print(f"embedding: {settings.embedding_provider} / {settings.embedding_model}"
+          f"{f'  (cache: {cache.hits} hits, {cache.misses} new)' if cache.enabled else ''}")
     print()
     for key in ("hit@5", "recall@5", "mrr", "ndcg@10", "answerable_not_abstained",
                 "abstain_accuracy", "latency_p50_ms", "latency_p95_ms"):
@@ -160,6 +180,12 @@ def main() -> int:
     parser.add_argument("--embedding", help="override the embedding provider for this run")
     parser.add_argument("--embedding-model", help="override the embedding model for this run")
     parser.add_argument("--embedding-base-url", help="override the embedding base URL for this run")
+    parser.add_argument("--rerank", choices=["llm", "cross-encoder"], help="enable reranking for this run")
+    parser.add_argument("--rerank-model", help="model the reranker should use")
+    parser.add_argument("--provider", help="override the generation provider (for the llm reranker)")
+    parser.add_argument("--model", help="override the generation model")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="always call the embedding provider instead of reusing cached vectors")
     args = parser.parse_args()
     try:
         return asyncio.run(main_async(args))

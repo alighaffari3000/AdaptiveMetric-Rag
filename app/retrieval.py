@@ -19,6 +19,12 @@ DATE_RE = re.compile(r"(?:\b(?:19|20)\d{2}\b|\b1[34]\d{2}\b|\d{1,2}[/.-]\d{1,2}[
 NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 DIMENSION = 384
 
+# Measured on eval/golden.jsonl; see eval/BASELINE.md. A top chunk about four
+# standard deviations above the corpus mean is as distinctive as retrieval gets.
+STANDOUT_REFERENCE = 4.0
+EARLY_EXIT_STANDOUT = 3.6
+EARLY_EXIT_MARGIN = .04
+
 PERSIAN_STOP = {"از", "به", "در", "با", "برای", "که", "این", "آن", "را", "و", "یا", "چه", "چرا", "چگونه", "است", "شد", "می"}
 ENGLISH_STOP = {"the", "a", "an", "of", "to", "in", "for", "is", "was", "and", "or", "what", "why", "how", "does"}
 
@@ -208,17 +214,126 @@ def _multi_keyword_signal(keywords: list[str], content: str) -> float:
     return min(1.0, matches / min(4, len(set(keywords))))
 
 
+
+RRF_K = 60
+
+
+def _weighted_rrf(signals: dict[str, np.ndarray], weights: dict[str, float], k: int = RRF_K) -> np.ndarray:
+    """Fuse heterogeneous signals by rank instead of by value.
+
+    Summing the raw signals weighted by intent looks reasonable but silently
+    favours whichever signal happens to have the widest numeric spread. A
+    semantic cosine varies over a narrow high band while BM25 is min-max
+    normalised across the full [0, 1] range, so the lexical term decided almost
+    every ranking no matter what the intent weights said. Reciprocal rank fusion
+    only reads the ordering each signal produces, so the weights mean what they
+    claim to mean.
+
+    A signal that separates nothing - all zeros, or one constant value - carries
+    no ordering, so it is skipped and its weight is not spent.
+    """
+    size = len(next(iter(signals.values()))) if signals else 0
+    fused = np.zeros(size, dtype=np.float64)
+    spent = 0.0
+    for name, values in signals.items():
+        weight = weights.get(name, 0.0)
+        if weight <= 0 or not size:
+            continue
+        ranked = np.flatnonzero(values > 0)
+        if ranked.size == 0:
+            continue
+        if ranked.size == size and np.ptp(values[ranked]) == 0:
+            continue  # every candidate scores the same: no ordering to contribute
+        order = ranked[np.argsort(-values[ranked], kind="stable")]
+        fused[order] += weight / (k + np.arange(1, order.size + 1))
+        spent += weight
+    if spent <= 0:
+        # Nothing separated these candidates - a single candidate, or every
+        # signal flat across all of them. They tie at the top rather than all
+        # scoring zero, which would make the evidence gate refuse a good answer.
+        return np.ones(size, dtype=np.float64)
+    # Rescale so that ranking first on every contributing signal reads as 1.0.
+    return fused * (k + 1) / spent
+
+
+def _weighted_sum(signals: dict[str, np.ndarray], weights: dict[str, float]) -> np.ndarray:
+    """The original scoring: each signal's value times its intent weight.
+
+    Kept for the feature-hashing embedding, where it still edges out rank fusion.
+    Its weights were tuned against exactly that signal mix, and rank fusion gives
+    a meaningless dense signal a fairer share of the vote than it deserves.
+    """
+    size = len(next(iter(signals.values()))) if signals else 0
+    total = np.zeros(size, dtype=np.float64)
+    for name, values in signals.items():
+        total += weights.get(name, 0.0) * values
+    return total
+
+
+def score_confidence(selected: list[dict[str, Any]], query_tokens: list[str],
+                     standout: float = 0.0) -> float:
+    """How much the retrieved evidence should be trusted, in [0, 1].
+
+    Two ingredients the reader can reason about: how strongly the best source
+    stands out from everything else in the library, and how much of the question
+    the selected text actually covers.
+
+    The fused score cannot serve as the first ingredient. Rank fusion puts the
+    best chunk at or near 1.0 for almost every query, including ones the library
+    cannot answer, because it measures ordering rather than quality. `standout`
+    is measured on the raw similarities instead, as how many standard deviations
+    the best chunk sits above the corpus mean, which does not depend on the
+    embedding model's own scale. When a reranker has run, its judgement of the
+    top chunk replaces it, being a direct answer to "does this passage answer
+    this question".
+    """
+    if not selected:
+        return 0.0
+    terms = set(query_tokens)
+    haystack = " ".join(chunk["content"].lower() for chunk in selected)
+    coverage = min(1.0, sum(1 for term in terms if term in haystack) / max(len(terms), 1))
+    reranked = selected[0].get("rerank_score")
+    relevance = float(reranked) if reranked is not None else min(1.0, standout / STANDOUT_REFERENCE)
+    return max(0.0, min(1.0, .55 * relevance + .45 * coverage))
+
+
 @dataclass
 class RetrievalResult:
     chunks: list[dict[str, Any]]
     analysis: QueryAnalysis
     confidence: float
     early_exit: bool
+    standout: float = 0.0
+
+
+def apply_semantic_profile(weights: dict[str, float], dense_weight: float) -> dict[str, float]:
+    """Raise the dense signal to its deserved share when the embedding is semantic.
+
+    The stock intent weights were tuned when the dense signal was feature hashing,
+    which carries no meaning: giving it 0.16 of the vote was correct then. A real
+    multilingual embedding ranks the right chunk first on its own, and the five
+    lexical signals combined were outvoting it. This keeps the adaptive idea - the
+    remaining share is still distributed by intent - while letting the strongest
+    signal lead.
+    """
+    if weights.get("dense", 0) >= dense_weight:
+        return weights
+    others = {name: value for name, value in weights.items() if name != "dense"}
+    total = sum(others.values()) or 1.0
+    remaining = 1.0 - dense_weight
+    adjusted = {name: value / total * remaining for name, value in others.items()}
+    adjusted["dense"] = dense_weight
+    return adjusted
 
 
 def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, filters: dict[str, Any] | None = None,
-             query_vector: list[float] | None = None) -> RetrievalResult:
+             query_vector: list[float] | None = None, dense_weight: float | None = None,
+             fusion: str = "linear") -> RetrievalResult:
     analysis = analyze_query(query)
+    if dense_weight is not None:
+        analysis = analysis.model_copy(
+            update={"weights": apply_semantic_profile(analysis.weights, dense_weight)}
+        )
     snapshot = index.snapshot()
     if not snapshot.size:
         return RetrievalResult([], analysis, 0.0, False)
@@ -252,6 +367,7 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
 
     bm_max = max((lexical[position] for position in candidates), default=1) or 1
     scored: list[dict[str, Any]] = []
+    signals: dict[str, list[float]] = {name: [] for name in analysis.weights}
     for position in candidates:
         row = snapshot.rows[position]
         content = row["content"]
@@ -265,23 +381,28 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
             "temporal": _temporal_signal(analysis.temporal_terms, content, analysis.intent == "temporal_fact"),
             "metadata": _overlap(qtokens[:6], metadata_text),
         }
-        final = sum(analysis.weights[key] * value for key, value in features.items())
+        for name, value in features.items():
+            signals[name].append(value)
         chunk = dict(row)
-        chunk.update(score=round(final, 6), features={k: round(v, 4) for k, v in features.items()})
+        chunk["features"] = {name: round(value, 4) for name, value in features.items()}
         scored.append(chunk)
+
+    arrays = {name: np.asarray(values, dtype=np.float64) for name, values in signals.items()}
+    fused = (_weighted_rrf(arrays, analysis.weights) if fusion == "rank"
+             else _weighted_sum(arrays, analysis.weights))
+    # How far the best chunk stands above the corpus, in standard deviations.
+    pool = dense[universe]
+    standout = float((pool.max() - pool.mean()) / (pool.std() + 1e-9)) if pool.size > 1 else 0.0
+    for chunk, value in zip(scored, fused):
+        chunk["score"] = round(float(value), 6)
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     selected = scored[:context_count]
+    confidence = score_confidence(selected, analysis.query_tokens or qtokens, standout)
     top = selected[0]["score"] if selected else 0.0
     second = selected[1]["score"] if len(selected) > 1 else 0.0
-    covered_terms = set(analysis.query_tokens) or set(qtokens)
-    haystack = " ".join(c["content"].lower() for c in selected)
-    coverage = min(1.0, sum(1 for term in covered_terms if term in haystack) / max(len(covered_terms), 1))
-    calibrated_top = min(1.0, top / .62)
-    separation = min(1.0, max(0.0, top - second) / .22)
-    confidence = max(0.0, min(1.0, .48 * calibrated_top + .40 * coverage + .12 * separation))
-    early = top > .86 and top - second > .20
-    return RetrievalResult(selected, analysis, round(confidence, 3), early)
+    early = standout > EARLY_EXIT_STANDOUT and top - second > EARLY_EXIT_MARGIN
+    return RetrievalResult(selected, analysis, round(confidence, 3), early, round(standout, 3))
 
 
 def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]]:

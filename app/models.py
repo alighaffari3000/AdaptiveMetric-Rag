@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 ProviderName = Literal["local", "ollama", "openai", "gemini"]
 EmbeddingProviderName = Literal["local", "ollama", "sentence-transformers", "openai", "gemini"]
+RerankBackend = Literal["cross-encoder", "llm"]
 
 
 class AppSettings(BaseModel):
@@ -28,6 +29,12 @@ class AppSettings(BaseModel):
     embedding_model: str = "multilingual-feature-hashing-v1"
     embedding_base_url: str = ""
     embedding_api_key: str = ""
+    semantic_dense_weight: float = Field(0.85, ge=0, le=1)
+    rerank_enabled: bool = False
+    rerank_backend: RerankBackend = "llm"
+    rerank_model: str = ""
+    rerank_top_n: int = Field(30, ge=5, le=100)
+    rerank_weight: float = Field(0.7, ge=0, le=1)
 
     @field_validator("chunk_overlap")
     @classmethod
@@ -42,6 +49,12 @@ class SettingsView(AppSettings):
     api_key: str = ""
     has_api_key: bool = False
     embedding_api_key: str = ""
+    semantic_dense_weight: float = Field(0.85, ge=0, le=1)
+    rerank_enabled: bool = False
+    rerank_backend: RerankBackend = "llm"
+    rerank_model: str = ""
+    rerank_top_n: int = Field(30, ge=5, le=100)
+    rerank_weight: float = Field(0.7, ge=0, le=1)
     has_embedding_api_key: bool = False
 
 
@@ -84,3 +97,5 @@ class ChatResponse(BaseModel):
     provider: str
     early_exit: bool = False
     evidence_found: bool = True
+    reranked: bool = False
+    timings_ms: dict[str, int] = Field(default_factory=dict)

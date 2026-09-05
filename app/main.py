@@ -18,11 +18,12 @@ from fastapi.staticfiles import StaticFiles
 
 from . import database
 from .documents import ALLOWED, content_digest, find_duplicate, ingest
-from .embeddings import create_query_embedding, embedding_info, reindex_all
+from .embeddings import embedding_info, reindex_all
 from .index import index as chunk_index
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
-from .retrieval import best_evidence, retrieve, select_grounded
+from .retrieval import best_evidence
+from .search import search
 
 
 logger = logging.getLogger("adaptive_metric_rag")
@@ -296,13 +297,12 @@ async def chat(request: ChatRequest):
     started = time.perf_counter()
     settings = load_settings()
     try:
-        query_vector = await create_query_embedding(settings, request.message)
+        result = await search(settings, request.message, request.filters)
     except (httpx.HTTPError, KeyError, ValueError) as exc:
-        raise HTTPException(502, f"Embedding provider error: {exc}") from exc
-    result = await asyncio.to_thread(
-        retrieve, request.message, settings.candidate_count, settings.context_count, request.filters, query_vector
-    )
-    evidence_found, grounded_chunks = select_grounded(result)
+        raise HTTPException(502, f"Retrieval failed: {exc}") from exc
+
+    evidence_found = result.evidence_found
+    grounded_chunks = result.chunks
     if evidence_found:
         try:
             answer = await generate(settings, request.message, grounded_chunks, result.analysis.language)
@@ -330,11 +330,14 @@ async def chat(request: ChatRequest):
     database.execute("INSERT INTO messages(id,conversation_id,role,content,citations,created_at) VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, conversation_id, "user", request.message, "[]", now))
     database.execute("INSERT INTO messages(id,conversation_id,role,content,citations,created_at) VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, conversation_id, "assistant", answer, database.json_value([c.model_dump() for c in citations]), now))
     database.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now, conversation_id))
-    return ChatResponse(conversation_id=conversation_id, answer=answer, citations=citations, analysis=result.analysis, confidence=result.confidence,
-                        latency_ms=round((time.perf_counter() - started) * 1000), provider=settings.provider,
-                        early_exit=(result.early_exit and settings.enable_early_exit
-                                    and result.confidence >= settings.confidence_threshold),
-                        evidence_found=evidence_found)
+    return ChatResponse(
+        conversation_id=conversation_id, answer=answer, citations=citations, analysis=result.analysis,
+        confidence=result.confidence, latency_ms=round((time.perf_counter() - started) * 1000),
+        provider=settings.provider,
+        early_exit=(result.early_exit and settings.enable_early_exit
+                    and result.confidence >= settings.confidence_threshold),
+        evidence_found=evidence_found, reranked=result.reranked, timings_ms=result.timings_ms,
+    )
 
 
 @app.get("/api/conversations")

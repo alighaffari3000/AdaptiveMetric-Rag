@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from app import embeddings
+from app import embeddings, net
 from app.documents import content_digest, find_duplicate
 from app.models import AppSettings
 
@@ -129,7 +129,7 @@ def test_gemini_request_uses_retrieval_task_types_and_normalises(monkeypatch):
         count = len(kwargs["json"]["requests"])
         return FakeResponse({"embeddings": [{"values": [3.0, 4.0]} for _ in range(count)]})
 
-    monkeypatch.setattr(embeddings, "_post_with_retry", fake_post)
+    monkeypatch.setattr(embeddings, "post_with_retry", fake_post)
     settings = settings_for("gemini", embedding_model="gemini-embedding-001", embedding_api_key="k")
 
     document_vectors = asyncio.run(embeddings.create_embeddings(settings, ["متن سند"], kind="document"))
@@ -155,7 +155,7 @@ def test_gemini_rejects_a_short_response(monkeypatch):
     async def fake_post(client, url, **kwargs):
         return FakeResponse()
 
-    monkeypatch.setattr(embeddings, "_post_with_retry", fake_post)
+    monkeypatch.setattr(embeddings, "post_with_retry", fake_post)
     settings = settings_for("gemini", embedding_api_key="k")
     with pytest.raises(ValueError, match="unexpected number"):
         asyncio.run(embeddings.create_embeddings(settings, ["a", "b"]))
@@ -178,11 +178,11 @@ def test_retry_gives_up_after_the_last_attempt(monkeypatch):
             attempts["count"] += 1
             raise httpx.ConnectTimeout("no route")
 
-    monkeypatch.setattr(embeddings, "RETRY_BASE_DELAY", 0)
-    monkeypatch.setattr(embeddings, "RETRY_MAX_DELAY", 0)
+    monkeypatch.setattr(net, "RETRY_BASE_DELAY", 0)
+    monkeypatch.setattr(net, "RETRY_MAX_DELAY", 0)
     with pytest.raises(httpx.ConnectTimeout):
-        asyncio.run(embeddings._post_with_retry(FailingClient(), "http://example.invalid"))
-    assert attempts["count"] == embeddings.RETRY_ATTEMPTS
+        asyncio.run(net.post_with_retry(FailingClient(), "http://example.invalid"))
+    assert attempts["count"] == net.RETRY_ATTEMPTS
 
 
 def test_retry_recovers_from_a_transient_failure(monkeypatch):
@@ -200,10 +200,10 @@ def test_retry_recovers_from_a_transient_failure(monkeypatch):
 
             return Ok()
 
-    monkeypatch.setattr(embeddings, "RETRY_BASE_DELAY", 0)
-    monkeypatch.setattr(embeddings, "RETRY_MAX_DELAY", 0)
+    monkeypatch.setattr(net, "RETRY_BASE_DELAY", 0)
+    monkeypatch.setattr(net, "RETRY_MAX_DELAY", 0)
     client = FlakyClient()
-    response = asyncio.run(embeddings._post_with_retry(client, "http://example.invalid"))
+    response = asyncio.run(net.post_with_retry(client, "http://example.invalid"))
     assert response.status_code == 200 and client.calls == 2
 
 
