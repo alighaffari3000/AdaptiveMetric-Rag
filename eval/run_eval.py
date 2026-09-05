@@ -58,6 +58,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
     database.init_db()
     settings = load_settings()
+    if args.embedding:
+        settings = settings.model_copy(update={
+            "embedding_provider": args.embedding,
+            "embedding_model": args.embedding_model or settings.embedding_model,
+            "embedding_base_url": args.embedding_base_url or "",
+        })
     cases = load_golden()
     if args.tag:
         cases = [case for case in cases if args.tag in case.tags]
@@ -151,6 +157,9 @@ def main() -> int:
     parser.add_argument("--tag", help="only run cases carrying this tag")
     parser.add_argument("--context", type=int, default=10, help="ranked chunks to score (default 10)")
     parser.add_argument("--verbose", action="store_true", help="list failing cases")
+    parser.add_argument("--embedding", help="override the embedding provider for this run")
+    parser.add_argument("--embedding-model", help="override the embedding model for this run")
+    parser.add_argument("--embedding-base-url", help="override the embedding base URL for this run")
     args = parser.parse_args()
     try:
         return asyncio.run(main_async(args))

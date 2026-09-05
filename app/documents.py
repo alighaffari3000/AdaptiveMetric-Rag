@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import re
@@ -75,6 +76,22 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
     return chunks
 
 
+def content_digest(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def find_duplicate(digest: str) -> dict | None:
+    """An identical file uploaded twice used to produce two full sets of chunks."""
+    for document in database.rows("SELECT id,name,created_at,metadata FROM documents"):
+        try:
+            metadata = json.loads(document["metadata"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if metadata.get("sha256") == digest:
+            return document
+    return None
+
+
 async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: int, overlap: int,
                  settings: AppSettings) -> dict:
     doc_id = uuid.uuid4().hex
@@ -85,10 +102,11 @@ async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: i
         [document_embedding_text(filename, piece.get("section"), piece["content"]) for piece in pieces],
     )
     now = datetime.now(timezone.utc).isoformat()
+    metadata = database.json_value({"sha256": content_digest(payload)})
     with database.connect() as db:
         db.execute(
             "INSERT INTO documents(id,name,type,size,chunks,created_at,metadata) VALUES(?,?,?,?,?,?,?)",
-            (doc_id, filename, content_type or "application/octet-stream", len(payload), len(pieces), now, "{}"),
+            (doc_id, filename, content_type or "application/octet-stream", len(payload), len(pieces), now, metadata),
         )
         for position, (piece, vector) in enumerate(zip(pieces, vectors)):
             text = piece["content"]

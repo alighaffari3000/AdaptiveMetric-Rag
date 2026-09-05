@@ -16,7 +16,9 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 - PDF, DOCX, TXT, Markdown, CSV, JSON, and HTML ingestion
 - Inline citations with source excerpts, page numbers, chunk IDs, and retrieval scores
 - Local no-key extractive mode, Ollama, OpenAI-compatible/dedicated endpoints, and Google Gemini
-- Selectable local or Ollama embedding models with automatic full re-indexing when the model changes
+- Semantic multilingual embeddings from a local sentence-transformers model, Ollama, an
+  OpenAI-compatible endpoint, or Gemini, with automatic re-indexing when the model changes
+- A golden-set evaluation harness reporting Recall@K, MRR, nDCG and abstention accuracy
 - Persistent conversations, documents, and settings in SQLite
 - Responsive Persian-first UI with a knowledge library and retrieval diagnostics
 - Rich Markdown answer rendering plus persistent dark and light themes
@@ -43,9 +45,39 @@ Query → Query Analyzer → Metric Router
                     Answer + citations
 ```
 
-The built-in embedding uses deterministic 384-dimensional multilingual feature hashing. It starts instantly, runs offline, and is appropriate for small and medium personal knowledge bases. The retrieval layer is isolated in `app/retrieval.py`, making it straightforward to replace candidate selection with Qdrant or FAISS for million-chunk deployments while retaining the adaptive scoring layer.
+Retrieval is served from an in-memory index built once at startup and refreshed on
+ingest, delete, and re-index: a float32 matrix for dense scoring and an inverted token
+index for BM25. Retrieval over 20,000 chunks takes about 13 ms.
 
-For higher multilingual accuracy, select `bge-m3` from Ollama. Document vectors include the filename, section, and chunk content; query vectors blend the original question with compact Persian/English keyword-expanded variants.
+### Choosing an embedding
+
+The zero-setup default is 384-dimensional feature hashing. It starts instantly and
+runs offline, but it is a **lexical** signal, not a semantic one: a Persian question
+and its English answer share no features, so cross-language retrieval does not work.
+Use it for a quick trial or a single-language corpus.
+
+For real use, pick a semantic model under **Settings -> Retrieval**:
+
+| Provider | Suggested model | Notes |
+|---|---|---|
+| `sentence-transformers` | `intfloat/multilingual-e5-small` | Fully local, about 470 MB, CPU friendly |
+| `sentence-transformers` | `BAAI/bge-m3` | Higher accuracy, about 2.2 GB |
+| `ollama` | `bge-m3` | Uses a model already pulled in Ollama |
+| `openai` | `text-embedding-3-small` | Any OpenAI-compatible `/embeddings` endpoint |
+| `gemini` | `gemini-embedding-001` | 768 dimensions, strong multilingual quality |
+
+The `sentence-transformers` option needs the optional extra:
+
+```bash
+pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-local-embeddings.txt
+```
+
+For Docker, build with `WITH_LOCAL_EMBEDDINGS=1` to bundle it (about 1 GB extra).
+Models are cached in the data volume, so a container rebuild does not re-download them.
+
+Document vectors include the filename, section, and chunk content. With a semantic
+model the question is embedded as written; feature hashing keeps the keyword-expanded
+variant blending it needs to match anything across languages.
 
 ## Quick start with Docker
 
@@ -102,6 +134,23 @@ API keys submitted through the interface are stored server-side and never return
 | Query expansion | On | Enables expansion behavior in confidence-aware extensions |
 
 Chunk settings apply to newly uploaded documents. Re-upload existing documents after changing them.
+
+Uploading a file whose contents are already in the library is rejected; delete the
+existing document first to replace it.
+
+## Measuring retrieval quality
+
+```bash
+python -m eval.run_eval --verbose          # score the golden set
+python -m eval.run_eval --embedding gemini --embedding-model gemini-embedding-001
+python -m eval.bench_latency               # latency at 1k / 5k / 20k chunks
+pytest -m eval                             # the same run as a test
+```
+
+`eval/` holds a 13-document Persian and English corpus and 89 labelled questions
+covering cross-lingual, multi-intent, follow-up, page-boundary and unanswerable
+cases. Recorded numbers for each change live in `eval/BASELINE.md`. See
+`eval/README.md` for the format and how to add cases.
 
 ## Local development
 

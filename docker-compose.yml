@@ -1,6 +1,11 @@
 services:
   adaptive-rag:
-    build: .
+    build:
+      context: .
+      args:
+        # Set to 1 to bundle sentence-transformers and a CPU-only torch
+        # (about 1 GB extra) for fully local semantic embeddings.
+        WITH_LOCAL_EMBEDDINGS: ${WITH_LOCAL_EMBEDDINGS:-0}
     container_name: adaptive-metric-rag
     ports:
       - "2266:2266"
@@ -9,6 +14,7 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      HF_HOME: /app/data/models
     volumes:
       - adaptive_rag_data:/app/data
     extra_hosts:

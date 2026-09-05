@@ -138,3 +138,78 @@ which is what let the table above show zeros. The plan's own stated fallback
 ("keep the current BM25 but precompute doc_freq and avg_len") pointed the same
 way. FTS5 remains available later, once RRF fusion in Phase 3 makes the exact
 lexical scale irrelevant.
+
+---
+
+# Phase 2 — semantic embeddings
+
+Recorded 2026-09-05. Measured with `gemini-embedding-001` at 768 dimensions,
+since neither Ollama nor a local sentence-transformers install was available on
+this machine. The other providers share the same code path.
+
+## The embedding itself is fixed
+
+| Pair | Feature hashing | Gemini |
+|---|---:|---:|
+| "قرارداد چه زمانی منقضی می‌شود؟" vs "When does the contract expire?" | 0.000 | 0.883 |
+
+## End-to-end quality: improved, but far below what the embedding supports
+
+| Metric | Phase 1 | Phase 2 (Gemini) | Delta |
+|---|---:|---:|---:|
+| hit@5 | 0.800 | 0.844 | +0.044 |
+| recall@5 | 0.794 | 0.833 | +0.039 |
+| MRR | 0.709 | 0.735 | +0.026 |
+| nDCG@10 | 0.736 | 0.767 | +0.031 |
+| answerable_not_abstained | 0.944 | 1.000 | +0.056 |
+| cross_lingual hit@5 | 0.400 | 0.533 | +0.133 |
+| fa2en hit@5 | 0.300 | 0.400 | +0.100 |
+| follow_up hit@5 | 0.500 | 1.000 | +0.500 |
+
+Phase 2's acceptance criteria were cross-lingual recall above 0.6 and overall
+recall 15 points above baseline. **Neither is met.** The reason is not the
+embedding.
+
+## Diagnosis: the adaptive linear sum suppresses the semantic signal
+
+Ranking the same corpus by the dense score alone, with everything else switched
+off, gives:
+
+| Tag | Full adaptive scoring | Dense only |
+|---|---:|---:|
+| cross_lingual | 0.533 | **1.000** |
+| fa2en | 0.400 | **1.000** |
+| en2fa | 0.800 | **1.000** |
+| conceptual | 0.571 | **1.000** |
+| causal | 0.857 | 0.929 |
+| numeric | 0.806 | 0.935 |
+| fa2fa | 0.884 | 0.977 |
+
+The embedding already ranks every cross-lingual case correctly. The final score
+then throws that away, for two compounding reasons:
+
+1. **The dense weight is small for most intents.** Factual, numeric and temporal
+   questions weight `dense` at 0.15 to 0.25, and those intents cover most of the
+   golden set. The lexical features carry the rest.
+2. **The signals are not on comparable scales.** Cosine similarities from a
+   semantic model sit in a narrow high band, so the spread between a relevant and
+   an irrelevant chunk is perhaps 0.15. BM25 is min-max normalised to fill [0, 1].
+   After weighting, a 0.15 dense spread times 0.16 is 0.024, against a lexical
+   spread of up to 0.19. The lexical term decides the ranking almost every time.
+
+Adding a better embedding to a weighted sum of unnormalised heterogeneous scores
+does not help much, because the sum was never able to use it. This is precisely
+what rank-based fusion fixes, so the acceptance criteria for this phase are
+carried into Phase 3 rather than declared met here.
+
+## Also in this phase
+
+- Query embedding no longer blends keyword-expanded variants when the provider is
+  semantic; blending was a crutch for feature hashing and only blurs a real model.
+- Confidence coverage is computed from the words the user actually typed. Counting
+  machine-added English expansions as "not covered" penalised every Persian
+  question asked against Persian sources.
+- Embedding requests retry transient failures with backoff. A single dropped
+  connection previously aborted an entire upload or re-index.
+- Uploading a file already in the library is rejected by SHA-256 content digest
+  instead of silently creating a second copy of every chunk.

@@ -128,6 +128,7 @@ def analyze_query(query: str) -> QueryAnalysis:
     caps = re.findall(r"\b[A-Z][A-Za-z0-9_.-]+\b", query)
     entities = list(dict.fromkeys(quoted + caps + [t for t in tokens if any(c.isdigit() for c in t)]))[:8]
     keywords = expanded_keywords(query)
+    query_tokens = list(dict.fromkeys(tokens))
 
     temporal_words = ("when", "date", "expire", "released", "زمان", "تاریخ", "پایان", "منقضی", "منتشر")
     causal_words = ("why", "cause", "reason", "چرا", "علت", "دلیل")
@@ -160,7 +161,7 @@ def analyze_query(query: str) -> QueryAnalysis:
         intent = "exact_fact"
         weights = {"dense": .25, "bm25": .19, "keyword": .11, "entity": .23, "numeric": .07, "temporal": .06, "metadata": .09}
     return QueryAnalysis(intent=intent, language=language, weights=weights, entities=entities, numbers=numbers,
-                         temporal_terms=temporal, keywords=keywords)
+                         temporal_terms=temporal, keywords=keywords, query_tokens=query_tokens)
 
 
 def _bm25(query_tokens: list[str], doc_tokens: list[str], avg_len: float, doc_freq: Counter[str], total: int) -> float:
@@ -273,7 +274,9 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     selected = scored[:context_count]
     top = selected[0]["score"] if selected else 0.0
     second = selected[1]["score"] if len(selected) > 1 else 0.0
-    coverage = min(1.0, sum(1 for t in set(qtokens) if t in " ".join(c["content"].lower() for c in selected)) / max(len(set(qtokens)), 1))
+    covered_terms = set(analysis.query_tokens) or set(qtokens)
+    haystack = " ".join(c["content"].lower() for c in selected)
+    coverage = min(1.0, sum(1 for term in covered_terms if term in haystack) / max(len(covered_terms), 1))
     calibrated_top = min(1.0, top / .62)
     separation = min(1.0, max(0.0, top - second) / .22)
     confidence = max(0.0, min(1.0, .48 * calibrated_top + .40 * coverage + .12 * separation))

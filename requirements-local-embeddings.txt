@@ -1,0 +1,11 @@
+# Optional: run semantic embedding models on this machine instead of calling out
+# to Ollama, an OpenAI-compatible endpoint, or Gemini.
+#
+#   pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+#       -r requirements-local-embeddings.txt
+#
+# The CPU wheel index keeps this to roughly 1 GB rather than pulling CUDA.
+# Models are cached under $HF_HOME (the container sets it to /app/data/models so
+# the download survives a container rebuild).
+torch==2.8.0
+sentence-transformers==5.1.0

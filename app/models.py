@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 ProviderName = Literal["local", "ollama", "openai", "gemini"]
-EmbeddingProviderName = Literal["local", "ollama"]
+EmbeddingProviderName = Literal["local", "ollama", "sentence-transformers", "openai", "gemini"]
 
 
 class AppSettings(BaseModel):
@@ -27,6 +27,7 @@ class AppSettings(BaseModel):
     embedding_provider: EmbeddingProviderName = "local"
     embedding_model: str = "multilingual-feature-hashing-v1"
     embedding_base_url: str = ""
+    embedding_api_key: str = ""
 
     @field_validator("chunk_overlap")
     @classmethod
@@ -40,6 +41,8 @@ class AppSettings(BaseModel):
 class SettingsView(AppSettings):
     api_key: str = ""
     has_api_key: bool = False
+    embedding_api_key: str = ""
+    has_embedding_api_key: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -68,6 +71,7 @@ class QueryAnalysis(BaseModel):
     numbers: list[str]
     temporal_terms: list[str]
     keywords: list[str] = Field(default_factory=list)
+    query_tokens: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import database
-from .documents import ALLOWED, ingest
+from .documents import ALLOWED, content_digest, find_duplicate, ingest
 from .embeddings import create_query_embedding, embedding_info, reindex_all
 from .index import index as chunk_index
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
@@ -110,6 +110,12 @@ def load_settings() -> AppSettings:
             base["api_key"] = os.getenv("OPENAI_API_KEY", "")
         elif provider == "gemini":
             base["api_key"] = os.getenv("GEMINI_API_KEY", "")
+    if not base.get("embedding_api_key"):
+        embedding_provider = base.get("embedding_provider", "local")
+        if embedding_provider == "openai":
+            base["embedding_api_key"] = os.getenv("OPENAI_API_KEY", "")
+        elif embedding_provider == "gemini":
+            base["embedding_api_key"] = os.getenv("GEMINI_API_KEY", "")
     if base.get("provider") == "ollama" and not base.get("base_url"):
         base["base_url"] = os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
     if base.get("embedding_provider") == "ollama" and not base.get("embedding_base_url"):
@@ -143,7 +149,9 @@ async def get_settings():
     current = load_settings()
     payload = current.model_dump()
     payload["has_api_key"] = bool(current.api_key)
+    payload["has_embedding_api_key"] = bool(current.embedding_api_key)
     payload["api_key"] = ""
+    payload["embedding_api_key"] = ""
     return SettingsView(**payload)
 
 
@@ -152,6 +160,8 @@ async def save_settings(settings: AppSettings):
     existing = load_settings()
     if not settings.api_key:
         settings.api_key = existing.api_key
+    if not settings.embedding_api_key:
+        settings.embedding_api_key = existing.embedding_api_key
     embedding_changed = (
         settings.embedding_provider != existing.embedding_provider
         or settings.embedding_model != existing.embedding_model
@@ -164,7 +174,8 @@ async def save_settings(settings: AppSettings):
             raise HTTPException(502, f"Embedding reindex failed; settings were not changed: {exc}") from exc
     database.execute("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (database.json_value(settings.model_dump()),))
     payload = settings.model_dump()
-    payload.update(api_key="", has_api_key=bool(settings.api_key))
+    payload.update(api_key="", has_api_key=bool(settings.api_key),
+                   embedding_api_key="", has_embedding_api_key=bool(settings.embedding_api_key))
     return SettingsView(**payload)
 
 
@@ -243,6 +254,13 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(400, "The uploaded file is empty")
     if len(payload) > 30 * 1024 * 1024:
         raise HTTPException(413, "Maximum file size is 30 MB")
+    duplicate = find_duplicate(content_digest(payload))
+    if duplicate:
+        raise HTTPException(
+            409,
+            f"This file is already in the library as '{duplicate['name']}'. "
+            "Delete it first to replace it.",
+        )
     try:
         settings = load_settings()
         return await ingest(file.filename or "document", file.content_type or "", payload,
