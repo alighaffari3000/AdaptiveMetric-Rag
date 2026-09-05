@@ -8,4 +8,5 @@ python-docx==1.2.0
 beautifulsoup4==4.13.4
 numpy==2.2.4
 pydantic==2.11.7
+cryptography==50.0.1
 pytest==8.4.1

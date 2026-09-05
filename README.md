@@ -140,7 +140,21 @@ You can alternatively provide `OPENAI_API_KEY` in `.env`.
 
 Select **Google Gemini**, enter a Gemini model such as `gemini-2.5-flash`, and add the API key. You can alternatively provide `GEMINI_API_KEY` in `.env`.
 
-API keys submitted through the interface are stored server-side and never returned to the browser. For public or multi-user production deployments, inject secrets through environment variables or a secrets manager and place the application behind authentication and TLS.
+API keys submitted through the interface are stored server-side and never returned to the browser.
+Set `APP_SECRET_KEY` to encrypt them at rest, or `APP_ENV=production` to read them from the
+environment only and have the API refuse to store one at all.
+
+| Variable | Effect |
+|---|---|
+| `APP_SECRET_KEY` | Encrypts saved API keys at rest |
+| `APP_ENV=production` | Keys come from the environment; saving one returns 403 |
+| `APP_AUTH_TOKEN` | Every request except `/health` needs `Authorization: Bearer <token>` |
+| `APP_RATE_LIMIT_CHAT` / `APP_RATE_LIMIT_UPLOAD` | Requests per minute per client; `0` disables |
+| `APP_LOG_FORMAT` / `APP_LOG_LEVEL` | `json` (default) or `text`; `INFO` by default |
+
+Logs are one JSON object per line carrying the request id, which is taken from `X-Request-ID`
+when the caller sends one and returned on every response. Still place a public deployment behind
+TLS: a bearer token over plain HTTP is a token anyone on the path can read.
 
 ## Retrieval settings
 

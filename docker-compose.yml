@@ -15,6 +15,15 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       HF_HOME: /app/data/models
+      # Set these to encrypt saved API keys, require a bearer token, and cap the
+      # endpoints that cost money. See .env.example.
+      APP_SECRET_KEY: ${APP_SECRET_KEY:-}
+      APP_ENV: ${APP_ENV:-}
+      APP_AUTH_TOKEN: ${APP_AUTH_TOKEN:-}
+      APP_RATE_LIMIT_CHAT: ${APP_RATE_LIMIT_CHAT:-30}
+      APP_RATE_LIMIT_UPLOAD: ${APP_RATE_LIMIT_UPLOAD:-20}
+      APP_LOG_FORMAT: ${APP_LOG_FORMAT:-json}
+      APP_LOG_LEVEL: ${APP_LOG_LEVEL:-INFO}
     volumes:
       - adaptive_rag_data:/app/data
     extra_hosts:

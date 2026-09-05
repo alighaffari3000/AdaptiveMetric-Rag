@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from . import database
+from .store import store
 from .text import date_terms, normalize, number_terms
 
 logger = logging.getLogger("adaptive_metric_rag.index")
@@ -31,14 +32,6 @@ logger = logging.getLogger("adaptive_metric_rag.index")
 K1 = 2.5
 B = .75
 SATURATION = 1.5  # the `tf + 1.5 * (...)` denominator term of the original formula
-
-CHUNK_QUERY = (
-    "SELECT c.id,c.document_id,c.position,c.page,c.page_end,c.section,c.section_path,c.parent_id,"
-    "c.content,c.vector,c.tokens,c.metadata,d.name document_name,d.type document_type "
-    "FROM chunks c JOIN documents d ON d.id=c.document_id "
-    "ORDER BY c.rowid"
-)
-
 
 @dataclass
 class Snapshot:
@@ -144,7 +137,7 @@ class ChunkIndex:
 
     def reload(self) -> Snapshot:
         """Rebuild the whole index from the database."""
-        rows = database.rows(CHUNK_QUERY)
+        rows = store.chunk_rows()
         snapshot = _build(rows)
         with self._lock:
             self._snapshot = snapshot

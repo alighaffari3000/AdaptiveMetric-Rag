@@ -213,7 +213,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             payload = response.json()
             answer = payload["message"]["content"]
             done_reason = payload.get("done_reason", "")
-            logger.warning("Ollama generation finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
+            logger.info("Ollama generation finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
             if _wrong_language(language, answer):
                 repair = await post_with_retry(client, f"{base}/api/chat", what="Ollama repair", json={
                     "model": settings.model, "stream": False, "think": False,
@@ -226,7 +226,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
                 repaired_payload = repair.json()
                 answer = repaired_payload["message"]["content"]
                 done_reason = repaired_payload.get("done_reason", "")
-                logger.warning("Ollama language repair finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), repaired_payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
+                logger.info("Ollama language repair finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), repaired_payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
             for attempt in range(2):
                 if not _looks_incomplete(question, answer, done_reason, strict):
                     break
@@ -242,7 +242,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
                 piece = continuation_payload["message"]["content"]
                 answer = _join_continuation(answer, piece)
                 done_reason = continuation_payload.get("done_reason", "")
-                logger.warning("Ollama continuation %d finished: reason=%s piece_chars=%d total_chars=%d complete=%s", attempt + 1, done_reason, len(piece), len(answer), not _looks_incomplete(question, answer, done_reason, strict))
+                logger.info("Ollama continuation %d finished: reason=%s piece_chars=%d total_chars=%d complete=%s", attempt + 1, done_reason, len(piece), len(answer), not _looks_incomplete(question, answer, done_reason, strict))
             return _finalize_answer(answer)
         if settings.provider == "openai":
             base = (settings.base_url or "https://api.openai.com/v1").rstrip("/")

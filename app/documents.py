@@ -19,6 +19,7 @@ from .embeddings import create_embeddings, document_embedding_text
 from .index import index
 from .models import AppSettings
 from .pdf import Block, Extraction, extract_pdf
+from .store import store
 from .text import tokenize
 
 
@@ -146,6 +147,39 @@ def content_digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+UPLOAD_DIR = database.DATA_DIR / "uploads"
+
+
+def store_original(document_id: str, filename: str, payload: bytes) -> str:
+    """Keep the uploaded file so a citation can be opened in its own document.
+
+    `data/uploads` was created at start-up and never written to. A citation
+    names a page of a PDF the application had already thrown away, so the one
+    thing a reader wants next - to look at that page - was impossible.
+    """
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(filename).suffix.lower()[:16]
+    target = UPLOAD_DIR / f"{document_id}{suffix}"
+    target.write_bytes(payload)
+    return target.name
+
+
+def original_path(stored_name: str) -> Path | None:
+    """The stored file, refusing any name that tries to leave the directory."""
+    if not stored_name or "/" in stored_name or "\\" in stored_name or stored_name.startswith("."):
+        return None
+    candidate = UPLOAD_DIR / stored_name
+    if candidate.parent != UPLOAD_DIR or not candidate.is_file():
+        return None
+    return candidate
+
+
+def forget_original(stored_name: str) -> None:
+    path = original_path(stored_name)
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
 def find_duplicate(digest: str) -> dict | None:
     """An identical file uploaded twice used to produce two full sets of chunks."""
     for document in database.rows("SELECT id,name,created_at,metadata FROM documents"):
@@ -189,12 +223,7 @@ def parent_windows(chunks: list[dict]) -> list[dict]:
         parent_id = chunk.get("parent_id")
         if parent_id and parent_id not in ordered:
             ordered.append(parent_id)
-    stored = {}
-    if ordered:
-        placeholders = ",".join("?" * len(ordered))
-        stored = {row["id"]: row for row in
-                  database.rows(f"SELECT id,content,page_start,page_end,section_path FROM parents "
-                                f"WHERE id IN ({placeholders})", tuple(ordered))}
+    stored = store.parents(ordered)
     widened: list[dict] = []
     seen: set[str] = set()
     for chunk in chunks:
@@ -235,7 +264,8 @@ async def ingest(filename: str, content_type: str, payload: bytes, settings: App
     )
     report(.85)
     now = datetime.now(timezone.utc).isoformat()
-    metadata = database.json_value({"sha256": content_digest(payload), "warnings": warnings})
+    metadata = database.json_value({"sha256": content_digest(payload), "warnings": warnings,
+                                    "file": store_original(doc_id, filename, payload)})
     parent_ids = [uuid.uuid4().hex for _ in windows]
     with database.connect() as db:
         db.execute(

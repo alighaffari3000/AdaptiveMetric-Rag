@@ -32,7 +32,10 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 - citation درون پاسخ همراه نام فایل، شماره صفحه، excerpt، chunk ID و score
 - حالت Local بدون API key و پشتیبانی از Ollama، OpenAI-compatible/dedicated و Gemini
 - انتخاب embedding محلی یا مدل نصب‌شده در Ollama همراه re-index خودکار هنگام تغییر مدل
-- نگهداری پایدار اسناد، تنظیمات و گفتگوها در SQLite
+- نگهداری پایدار اسناد، تنظیمات و گفتگوها در SQLite؛ فایل اصلی هر سند هم نگه داشته می‌شود و از
+  `/api/documents/{id}/file` قابل دریافت است
+- امنیت اختیاری و خاموش به‌صورت پیش‌فرض: رمزنگاری کلیدهای API با `APP_SECRET_KEY`، توکن Bearer با
+  `APP_AUTH_TOKEN` و محدودیت نرخ روی نقطه‌های پرهزینه؛ لاگ JSON با شناسه درخواست
 - رابط responsive و فارسی با کتابخانه منابع و نمایش metricهای retrieval
 - نمایش زیبای Markdown پاسخ‌ها همراه تم روشن و تیره پایدار
 - خروجی JSON مستقل برای هر گفتگو شامل پیام‌ها، Citationها و مشخصات امن مدل‌ها

@@ -18,17 +18,21 @@ from fastapi.staticfiles import StaticFiles
 
 from . import database
 from .claims import ABSTAIN_MARKER, Claim, claims_from_markers, parse_structured, with_markers
-from .documents import (ALLOWED, content_digest, find_duplicate, ingest, parent_windows,
-                        refresh_chunk_tokens)
+from .documents import (ALLOWED, content_digest, find_duplicate, forget_original, ingest,
+                        original_path, parent_windows, refresh_chunk_tokens)
 from .embeddings import embedding_info, is_semantic, reindex_all
 from .index import index as chunk_index
 from .net import ProviderError, redact
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, ClaimView, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence
+from .observability import configure_logging, tag_requests
 from .search import search
+from .security import guard
+from .store import store
 from .streaming import sse, stream_answer
 from .verify import verify
+from . import secrets
 from .text import NORMALIZER_VERSION, tokenize
 
 
@@ -89,6 +93,12 @@ async def upgrade_to_current_normalizer(settings: AppSettings) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    configure_logging()
+    if secrets.production_mode():
+        logger.info("running in production mode: API keys are read from the environment only")
+    elif not secrets.available():
+        logger.warning("APP_SECRET_KEY is not set, so API keys saved from the interface are "
+                       "stored in clear text in the database")
     database.init_db()
     if not database.meta_get(CITATION_REFRESH_KEY):
         await asyncio.to_thread(refresh_saved_citation_highlights)
@@ -101,6 +111,8 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="AdaptiveMetric RAG", version="1.0.0", lifespan=lifespan)
+app.middleware("http")(guard)
+app.middleware("http")(tag_requests)
 static_dir = Path(__file__).resolve().parent.parent / "static"
 app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
 
@@ -165,6 +177,11 @@ def answer_abstained(answer: str) -> bool:
 def load_settings() -> AppSettings:
     saved = database.row("SELECT value FROM settings WHERE id=1")
     base = json.loads(saved["value"]) if saved else {}
+    if secrets.production_mode():
+        base["api_key"] = base["embedding_api_key"] = ""
+    else:
+        base["api_key"] = secrets.decrypt(base.get("api_key", ""))
+        base["embedding_api_key"] = secrets.decrypt(base.get("embedding_api_key", ""))
     if not base.get("api_key"):
         provider = base.get("provider", "local")
         if provider == "openai":
@@ -199,11 +216,13 @@ async def health():
 @app.get("/api/system/info")
 async def system_info():
     info = embedding_info(load_settings())
+    secrecy = secrets.describe()
     # A cold index reloads from the database here; keep that off the event loop.
     snapshot = await asyncio.to_thread(chunk_index.snapshot)
     if snapshot.size:
         info["dimensions"] = int(snapshot.matrix.shape[1])
-    return {"embedding": info, "index": {"chunks": snapshot.size, "stale_vectors": snapshot.stale_vectors}}
+    return {"embedding": info, "index": {"chunks": snapshot.size, "stale_vectors": snapshot.stale_vectors},
+            "secrets": secrecy}
 
 
 @app.get("/api/settings", response_model=SettingsView)
@@ -220,6 +239,9 @@ async def get_settings():
 @app.put("/api/settings", response_model=SettingsView)
 async def save_settings(settings: AppSettings):
     existing = load_settings()
+    if secrets.production_mode() and (settings.api_key or settings.embedding_api_key):
+        raise HTTPException(
+            403, "This deployment reads API keys from the environment; they cannot be saved here.")
     if not settings.api_key:
         settings.api_key = existing.api_key
     if not settings.embedding_api_key:
@@ -234,7 +256,12 @@ async def save_settings(settings: AppSettings):
             await reindex_all(settings)
         except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
             raise HTTPException(502, f"Embedding reindex failed; settings were not changed: {redact(exc)}") from exc
-    database.execute("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (database.json_value(settings.model_dump()),))
+    stored = settings.model_dump()
+    # Encrypted at rest when a secret is configured; the plain values stay in
+    # memory for this process only.
+    stored["api_key"] = secrets.encrypt(settings.api_key)
+    stored["embedding_api_key"] = secrets.encrypt(settings.embedding_api_key)
+    database.execute("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", (database.json_value(stored),))
     payload = settings.model_dump()
     payload.update(api_key="", has_api_key=bool(settings.api_key),
                    embedding_api_key="", has_embedding_api_key=bool(settings.embedding_api_key))
@@ -374,11 +401,32 @@ async def document_status(document_id: str):
     return document
 
 
+@app.get("/api/documents/{document_id}/file")
+async def download_document(document_id: str):
+    """The file as it was uploaded, so a cited page can be opened."""
+    document = database.row("SELECT name,type,metadata FROM documents WHERE id=?", (document_id,))
+    if not document:
+        raise HTTPException(404, "Document not found")
+    try:
+        metadata = json.loads(document["metadata"] or "{}")
+    except json.JSONDecodeError:
+        metadata = {}
+    path = original_path(metadata.get("file", ""))
+    if path is None:
+        raise HTTPException(404, "The original file was not kept for this document")
+    return FileResponse(path, media_type=document["type"] or "application/octet-stream",
+                        filename=document["name"])
+
+
 @app.delete("/api/documents/{document_id}")
 async def delete_document(document_id: str):
-    found = database.row("SELECT id FROM documents WHERE id=?", (document_id,))
+    found = database.row("SELECT id,metadata FROM documents WHERE id=?", (document_id,))
     if not found:
         raise HTTPException(404, "Document not found")
+    try:
+        forget_original(json.loads(found["metadata"] or "{}").get("file", ""))
+    except json.JSONDecodeError:
+        pass
     database.execute("DELETE FROM documents WHERE id=?", (document_id,))
     chunk_index.invalidate()
     return {"ok": True}
@@ -386,11 +434,7 @@ async def delete_document(document_id: str):
 
 @app.get("/api/chunks/{chunk_id}")
 async def get_chunk(chunk_id: str):
-    chunk = database.row(
-        "SELECT c.id,c.document_id,c.page,c.page_end,c.section,c.section_path,c.content,d.name document_name "
-        "FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.id=?",
-        (chunk_id,),
-    )
+    chunk = store.chunk(chunk_id)
     if not chunk:
         raise HTTPException(404, "Chunk not found")
     return chunk

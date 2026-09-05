@@ -687,3 +687,85 @@ interface shows how many were not supported.
 - A claim that is only a marker is no longer a claim. `[1]` written after a
   full stop became its own sentence when the answer was split, and then failed
   verification because "1" read as a number the source did not contain.
+
+---
+
+# Phase 7 — operations, security and scale
+
+No retrieval metric moves in this phase. What changes is what happens when the
+application is run by someone other than its author, on a machine other than
+their laptop.
+
+## API keys
+
+They sat in the settings row as written, so anyone with the database file - a
+backup, a copied volume, a support dump - had the provider key. Three modes now,
+and the application says which one it is in, at start-up and in
+`/api/system/info`:
+
+| Configuration | Where the key lives | Saving from the interface |
+|---|---|---|
+| `APP_ENV=production` | environment only | refused, with a 403 that says why |
+| `APP_SECRET_KEY` set | encrypted at rest (Fernet) | allowed |
+| neither | stored as written | allowed, with a warning at start-up |
+
+A key encrypted under a secret that has since been rotated decrypts to empty
+rather than raising, so rotating the secret costs the provider connection and
+not the application.
+
+## Access and rate limits
+
+`APP_AUTH_TOKEN` turns on a bearer check on everything except `/health`, which
+a container probe needs. The token is compared with `hmac.compare_digest`, so a
+wrong guess takes the same time as a right one.
+
+The rate limit is a fixed window per client per minute, and only on the two
+endpoints that spend money: answering calls a provider, uploading embeds every
+chunk of a document. Reads are never limited - they are database queries, and
+limiting them would only break the interface. Both limits are environment
+variables and `0` switches either off.
+
+Neither is on by default. The default deployment is one person on their own
+machine, and requiring a token there would be security theatre with a cost.
+
+## Logs
+
+One JSON object per record, carrying the id of the request it belongs to. The
+id comes from `X-Request-ID` when the caller sends one and is returned on every
+response, so a question can be followed across retrieval, embedding, reranking,
+generation and verification - which was impossible before, because those five
+stages logged under five names with nothing tying them together.
+
+The production level moved from warning to info, and the generation lines that
+described the ordinary course of events moved from warning to info with it. A
+log that is silent until something breaks cannot explain what led to the break.
+
+## The storage seam
+
+`app/store.py` states what retrieval needs from storage - three reads, no
+writes, no vector search - and `SqliteStore` implements it. The index and the
+parent-window lookup go through it instead of writing their own SQL. Nothing
+else implements it today; the file exists so the boundary is somewhere specific
+rather than spread across three modules, and a Postgres or Qdrant backing would
+be a class rather than an edit to the retrieval path.
+
+Ranking deliberately stays in this application rather than moving into a
+vector database's query. Every measurement in this file depends on the fusion,
+the intent weights and the gate being ours to change.
+
+## `data/uploads` has a purpose now
+
+It was created at every start-up and never written to. A citation names a page
+of a PDF that had been discarded after ingestion, so the obvious next step -
+open that page - was impossible. The original file is kept beside the database
+and served from `/api/documents/{id}/file`; deleting a document deletes it.
+
+The path is rebuilt from the document id rather than trusted from the database,
+and a stored name that tries to leave the directory is refused.
+
+## Test coverage
+
+`tests/test_operations.py` covers all of the above, including one test that
+walks a document through its whole life: upload, answer, citation, chunk
+lookup, original file, follow-up question, export, delete, and the corpus no
+longer answering. 231 tests pass.
