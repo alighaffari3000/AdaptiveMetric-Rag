@@ -769,3 +769,36 @@ and a stored name that tries to leave the directory is refused.
 walks a document through its whole life: upload, answer, citation, chunk
 lookup, original file, follow-up question, export, delete, and the corpus no
 longer answering. 231 tests pass.
+
+---
+
+# Review pass — defects found re-reading Phases 4 to 7
+
+Each was reproduced against the running application before it was fixed, and
+each now has a regression test.
+
+- **The interface was unreachable once a token was required.** `/` and
+  `/assets/*` sat behind the bearer check, and a browser cannot send a bearer
+  header for its first request. The page and its scripts are public now; every
+  API route is as protected as before.
+- **A PDF set entirely in a bold face produced no chunks.** Bold counted as a
+  heading, so a document with a bold body became all headings and no body -
+  and headings lead their section rather than being chunked. Bold marks a
+  heading only where fewer than half the lines are bold.
+- **Start-up removed every logging handler on the root logger**, including a
+  test runner's capture and any handler an operator had attached. It now
+  replaces only the handler it installed itself.
+- **A downloaded upload was served with the type the uploader declared**, so an
+  HTML file came back as `text/html` under this origin. Always a download now,
+  as `application/octet-stream`.
+- **Heading words were invisible to BM25.** Since Phase 5 a heading is not part
+  of any chunk's text, so a question phrased in a heading's words had nothing
+  lexical to match. The stored tokens now include the section path; MRR 0.729
+  to 0.737, nDCG@10 0.759 to 0.764, everything else unchanged.
+- The request log recorded a streamed answer as the three milliseconds before
+  its first byte; it is written when the body has gone out. A key that cannot
+  be decrypted warned on every request; once per process now. The library
+  shows a document that failed or is still being read instead of "0 chunks".
+  Rate-limit windows for clients that never return are pruned.
+
+236 tests pass. Retrieval metrics otherwise unchanged.

@@ -54,3 +54,4 @@ main{min-height:0;overflow:hidden}
 
 .document-item .doc-download{color:#8e98aa;text-decoration:none;padding:0 6px;font-size:15px}
 .document-item .doc-download:hover{color:#e6edf7}
+.document-item .doc-failed{color:#e0725c}

@@ -214,10 +214,16 @@ def extract_pdf(payload: bytes) -> Extraction:
     document = pymupdf.open(stream=payload, filetype="pdf")
     try:
         raw_pages = [page.get_text("dict") for page in document]
-        all_sizes = [size for page in raw_pages for block in page.get("blocks", [])
-                     for line in block.get("lines", []) for size in [_line_text(line)[1]] if size]
+        measured = [(size, bold) for page in raw_pages for block in page.get("blocks", [])
+                    for line in block.get("lines", []) for _, size, bold in [_line_text(line)] if size]
+        all_sizes = [size for size, _ in measured]
         body_size = sorted(all_sizes)[len(all_sizes) // 2] if all_sizes else 0.0
         levels = _heading_levels(all_sizes, body_size)
+        # Bold marks a heading only where bold is the exception. A document set
+        # entirely in a bold face - common in scanned-and-retyped Persian
+        # contracts - would otherwise become all headings and no body, and
+        # yield no chunks at all.
+        bold_is_heading = measured and sum(1 for _, bold in measured if bold) / len(measured) < .5
 
         blocks: list[Block] = []
         for number, page in enumerate(document, start=1):
@@ -235,7 +241,8 @@ def extract_pdf(payload: bytes) -> Extraction:
                     table_rectangles.append(table.bbox)
                     blocks.append(Block(text=repair_direction(serialized, reference, policy),
                                         page=number, kind="table"))
-            page_blocks = _page_blocks(raw_pages[number - 1], table_rectangles, levels, body_size)
+            page_blocks = _page_blocks(raw_pages[number - 1], table_rectangles, levels,
+                                       body_size if bold_is_heading else 0.0)
             if not page_blocks and not table_rectangles:
                 scanned = _ocr_page(page, warnings)
                 if scanned.strip():
@@ -272,7 +279,10 @@ def _overlaps(rectangle: tuple[float, float, float, float],
 
 def _page_blocks(raw_page: dict[str, Any], table_rectangles: list, levels: dict[float, int],
                  body_size: float) -> list[tuple[str, int]]:
-    """Group a page's lines into blocks, splitting wherever a heading appears."""
+    """Group a page's lines into blocks, splitting wherever a heading appears.
+
+    `body_size` of zero switches the bold-means-heading rule off.
+    """
     collected: list[tuple[str, int]] = []
     for block in raw_page.get("blocks", []):
         if block.get("type") != 0 or _overlaps(block.get("bbox", (0, 0, 0, 0)), table_rectangles):

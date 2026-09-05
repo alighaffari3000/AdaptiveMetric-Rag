@@ -24,6 +24,14 @@ import logging
 import os
 
 logger = logging.getLogger("adaptive_metric_rag.secrets")
+_warned: set[str] = set()
+
+
+def _warn_once(message: str) -> None:
+    """`load_settings` runs on every request; the same warning need not."""
+    if message not in _warned:
+        _warned.add(message)
+        logger.warning(message)
 
 PREFIX = "enc:v1:"
 
@@ -77,14 +85,14 @@ def decrypt(value: str) -> str:
         return value
     cipher = _fernet()
     if cipher is None:
-        logger.warning("a stored API key is encrypted but APP_SECRET_KEY is not set")
+        _warn_once("a stored API key is encrypted but APP_SECRET_KEY is not set")
         return ""
     from cryptography.fernet import InvalidToken
 
     try:
         return cipher.decrypt(value[len(PREFIX):].encode("ascii")).decode("utf-8")
     except InvalidToken:
-        logger.warning("a stored API key could not be decrypted with the current APP_SECRET_KEY")
+        _warn_once("a stored API key could not be decrypted with the current APP_SECRET_KEY")
         return ""
 
 

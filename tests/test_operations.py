@@ -96,6 +96,39 @@ def test_a_configured_token_is_required(client, monkeypatch):
     assert client.get("/api/documents", headers={"Authorization": "Bearer letmein"}).status_code == 200
 
 
+def test_the_interface_itself_loads_without_a_token(client, monkeypatch):
+    """A browser cannot send a bearer header for its first request."""
+    monkeypatch.setenv("APP_AUTH_TOKEN", "letmein")
+    assert client.get("/").status_code == 200
+    assert client.get("/assets/app.js").status_code == 200
+    assert client.get("/api/documents").status_code == 401
+
+
+def test_a_downloaded_upload_is_never_served_as_a_page(client):
+    """An HTML upload rendered under this origin would run with the token."""
+    document = upload(client, "page.html", b"<h1>x</h1><script>alert(1)</script>")
+    response = client.get(f"/api/documents/{document['id']}/file")
+    assert response.headers["content-type"].startswith("application/octet-stream")
+    assert response.headers["content-disposition"].startswith("attachment")
+
+
+def test_start_up_keeps_handlers_it_did_not_install(fresh_db):
+    from app.main import app
+
+    root = logging.getLogger()
+    marker = logging.NullHandler()
+    root.addHandler(marker)
+    try:
+        with TestClient(app):
+            pass
+        with TestClient(app):  # a second start replaces only its own handler
+            pass
+        assert marker in root.handlers
+        assert sum(1 for h in root.handlers if getattr(h, "adaptive_metric_rag", False)) == 1
+    finally:
+        root.removeHandler(marker)
+
+
 def test_health_stays_reachable_for_a_container_probe(client, monkeypatch):
     monkeypatch.setenv("APP_AUTH_TOKEN", "letmein")
     assert client.get("/health").status_code == 200

@@ -68,6 +68,27 @@ def test_a_digit_run_is_only_flipped_when_the_other_engine_disagrees():
     assert align_digit_runs("شماره ۲۴۹ است", "شماره ۱۳۷ است") == "شماره ۲۴۹ است"
 
 
+def test_a_pdf_set_entirely_in_bold_is_body_text_not_headings():
+    """Bold marks a heading only where bold is the exception."""
+    pymupdf = pytest.importorskip("pymupdf")
+    document = pymupdf.open()
+    page = document.new_page()
+    for n in range(12):
+        page.insert_text((72, 72 + 16 * n), f"Bold body sentence number {n} about the cold chain.",
+                         fontname="helvetica-bold", fontsize=11)
+    extraction = extract("bold.pdf", document.tobytes())
+    assert all(block.kind == "text" for block in extraction.blocks)
+    pieces, _ = build_pieces(extraction.blocks, 250, 40, 900)
+    assert pieces and "cold chain" in pieces[0].content
+
+
+def test_heading_words_are_searchable_for_the_chunk_beneath_them():
+    from app.documents import chunk_tokens
+
+    tokens = chunk_tokens("بیست و شش روز کاری است.", "آیین‌نامه › مرخصی")
+    assert "مرخصی" in tokens and "کاری" in tokens
+
+
 # --- structure ---
 
 

@@ -414,8 +414,10 @@ async def download_document(document_id: str):
     path = original_path(metadata.get("file", ""))
     if path is None:
         raise HTTPException(404, "The original file was not kept for this document")
-    return FileResponse(path, media_type=document["type"] or "application/octet-stream",
-                        filename=document["name"])
+    # Always a download, never a page: the stored type is whatever the uploader
+    # declared, and an HTML file rendered under this origin would run its
+    # scripts with access to the interface's token.
+    return FileResponse(path, media_type="application/octet-stream", filename=document["name"])
 
 
 @app.delete("/api/documents/{document_id}")

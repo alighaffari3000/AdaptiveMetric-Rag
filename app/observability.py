@@ -67,9 +67,14 @@ def configure_logging() -> None:
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+    handler.adaptive_metric_rag = True  # type: ignore[attr-defined]
     root = logging.getLogger()
+    # Replace only the handler this function installed on an earlier start; a
+    # handler someone else attached - a test runner's capture, an operator's
+    # file handler - is theirs to keep.
     for existing in list(root.handlers):
-        root.removeHandler(existing)
+        if getattr(existing, "adaptive_metric_rag", False):
+            root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(getattr(logging, level, logging.INFO))
     # Access logs would double every line the middleware already records.
@@ -79,19 +84,38 @@ def configure_logging() -> None:
 async def tag_requests(request: Request, call_next):
     """Give every request an id, log how it went, and hand the id back."""
     incoming = request.headers.get("x-request-id", "").strip()
-    token = request_id.set(incoming[:64] or uuid.uuid4().hex[:16])
+    current = incoming[:64] or uuid.uuid4().hex[:16]
+    token = request_id.set(current)
     started = time.perf_counter()
-    status = 500
-    try:
-        response = await call_next(request)
-        status = response.status_code
-        response.headers["X-Request-ID"] = request_id.get()
-        return response
-    finally:
+
+    def record(status: int) -> None:
         duration = round((time.perf_counter() - started) * 1000, 1)
         logging.getLogger("adaptive_metric_rag.request").info(
             "%s %s -> %s", request.method, request.url.path, status,
-            extra={"method": request.method, "path": request.url.path,
-                   "status": status, "duration_ms": duration},
+            extra={"method": request.method, "path": request.url.path, "status": status,
+                   "duration_ms": duration, "request_id": current},
         )
+
+    try:
+        response = await call_next(request)
+    except BaseException:
+        record(500)
         request_id.reset(token)
+        raise
+    response.headers["X-Request-ID"] = current
+    request_id.reset(token)
+
+    # A streamed answer is mostly sent after this function returns; logging
+    # here would record the three milliseconds before the first byte and call
+    # it the request. The line is written when the body has actually gone out.
+    body = response.body_iterator
+
+    async def logged_body():
+        try:
+            async for part in body:
+                yield part
+        finally:
+            record(response.status_code)
+
+    response.body_iterator = logged_body()
+    return response

@@ -28,9 +28,15 @@ from fastapi.responses import JSONResponse
 
 logger = logging.getLogger("adaptive_metric_rag.security")
 
-PUBLIC_PATHS = ("/health",)
+# The page and its scripts are not data, and a browser cannot send a bearer
+# header for its first request anyway: protecting them would only make the
+# interface unreachable while every API route stayed exactly as protected.
+PUBLIC_PATHS = ("/health", "/")
+PUBLIC_PREFIXES = ("/assets/",)
 RATE_LIMITED = {"/api/chat": "chat", "/api/chat/stream": "chat", "/api/documents": "upload"}
 WINDOW_SECONDS = 60.0
+# Clients that never come back would otherwise keep their window forever.
+PRUNE_ABOVE = 10_000
 
 _hits: dict[tuple[str, str], deque[float]] = defaultdict(deque)
 
@@ -69,6 +75,9 @@ def over_limit(request: Request) -> tuple[bool, int, int]:
     if not limit:
         return False, 0, 0
     now = time.monotonic()
+    if len(_hits) > PRUNE_ABOVE:
+        for key in [key for key, seen in _hits.items() if not seen or now - seen[-1] > WINDOW_SECONDS]:
+            del _hits[key]
     window = _hits[(client_id(request), kind)]
     while window and now - window[0] > WINDOW_SECONDS:
         window.popleft()
@@ -82,7 +91,8 @@ def authorised(request: Request) -> bool:
     expected = auth_token()
     if not expected:
         return True
-    if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES) or request.method == "OPTIONS":
         return True
     header = request.headers.get("authorization", "")
     scheme, _, presented = header.partition(" ")

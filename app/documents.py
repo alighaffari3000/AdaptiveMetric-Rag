@@ -192,16 +192,28 @@ def find_duplicate(digest: str) -> dict | None:
     return None
 
 
+def chunk_tokens(content: str, section_path: str | None) -> list[str]:
+    """What BM25 sees of a chunk: its text and the headings above it.
+
+    Headings are not part of any chunk's text since Phase 5 - they lead their
+    section instead of being cut into it - so a question phrased in a heading's
+    words («مرخصی استعلاجی») would otherwise find nothing lexical to match. The
+    embedding already sees the section path; this gives the lexical signal the
+    same view.
+    """
+    return tokenize(content) + tokenize(section_path or "")
+
+
 def refresh_chunk_tokens() -> int:
     """Recompute every chunk's stored tokens with the current normalizer.
 
     Returns the number of chunks whose tokens actually changed, so the caller
     can tell an upgrade from a no-op.
     """
-    stored = database.rows("SELECT id,content,tokens FROM chunks")
+    stored = database.rows("SELECT id,content,section_path,tokens FROM chunks")
     updates = []
     for chunk in stored:
-        tokens = database.json_value(tokenize(chunk["content"]))
+        tokens = database.json_value(chunk_tokens(chunk["content"], chunk.get("section_path")))
         if tokens != chunk["tokens"]:
             updates.append((tokens, chunk["id"]))
     if updates:
@@ -288,7 +300,8 @@ async def ingest(filename: str, content_type: str, payload: bytes, settings: App
                 "content,vector,tokens,metadata) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (uuid.uuid4().hex, doc_id, position, piece.page_start, piece.page_end, piece.section,
                  piece.section_path, parent_ids[piece.parent] if parent_ids else None, piece.content,
-                 database.encode_vector(vector), database.json_value(tokenize(piece.content)), "{}"),
+                 database.encode_vector(vector),
+                 database.json_value(chunk_tokens(piece.content, piece.section_path)), "{}"),
             )
     index.invalidate()
     report(1.0)
