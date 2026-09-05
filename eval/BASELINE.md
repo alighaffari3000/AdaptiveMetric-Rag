@@ -385,3 +385,95 @@ provider echoes them in a body.
 
 Quality after the review pass is unchanged on every metric for both
 configurations. Latency at 20,000 chunks stays under 20 ms.
+
+---
+
+# Phase 4 — question understanding and conversation memory
+
+Measured 2026-09-05 on the same corpus and golden set. The semantic
+configuration could not be re-measured: this machine has no embedding API key,
+so every number here is the feature-hashing default, which is also the
+configuration Phases 0 and 1 were recorded on.
+
+Reproduce with:
+
+```
+python -m eval.run_eval --rewrite off     # normalizer and router only
+python -m eval.run_eval                   # the default: offline rewriter as well
+```
+
+## Quality
+
+| Metric | Before Phase 4 | Normalizer + router | With the rewriter |
+|---|---:|---:|---:|
+| hit@5 | 0.800 | 0.811 | **0.844** |
+| recall@5 | 0.794 | 0.806 | **0.839** |
+| MRR | 0.709 | 0.710 | **0.743** |
+| nDCG@10 | 0.736 | 0.737 | **0.770** |
+| answerable not abstained | 0.956 | 0.956 | **0.978** |
+| latency p95 (ms) | 2.2 | 1.8 | 1.7 |
+
+By tag, recall@5:
+
+| Tag | Before | After |
+|---|---:|---:|
+| follow_up | 0.500 | **1.000** |
+| fa2fa | 0.826 | **0.919** |
+| numeric | 0.726 | **0.823** |
+| causal | 0.714 | **0.786** |
+| en2en | 1.000 | 1.000 |
+| cross_lingual | 0.400 | 0.400 |
+
+The acceptance criterion for the phase was recall@5 above 0.7 on the follow-up
+subset. All four cases now retrieve their document.
+
+## Where the gain comes from
+
+**The normalizer, not the router.** Folding Persian text once - Arabic `ي`/`ك`,
+the half space, kashida, harakat, and `۱۴۰۳`/`١٤٠٣`/`1403` - is what moved
+`fa2fa` and `numeric`. Before it, `DATE_RE` could not match `۱۴۰۲` at all,
+because the `1` and the `4` in its year pattern were Latin literals: every
+Persian date in the corpus was invisible to the temporal signal, which is the
+signal that intent weighting leans on hardest for those questions. Numbers now
+compare as canonical values rather than as substrings, so `۲٬۴۰۰٬۰۰۰٬۰۰۰`
+matches `2,400,000,000` while `137` no longer matches `1370`.
+
+**The rewriter carries the whole follow-up gain.** Retrieval on «و مبلغش چقدر
+بود؟» has nothing to work with; the same question with the previous turn's topic
+appended reaches the right contract every time. It also lifted
+`answerable_not_abstained`: a question the retriever cannot ground is a question
+the evidence gate refuses.
+
+**The multi-label router is close to quality-neutral here.** Splitting a
+question's vote across the intents it actually states moved the aggregate by
+about one point, and `multi_intent` did not move at all. That is the honest
+result: with feature hashing the dense signal carries no meaning, so any mix of
+weights is a mix of lexical signals. The router's value is that
+«چرا مبلغ قرارداد ۱۳۷ در سال ۱۴۰۳ تغییر کرد؟» is now scored as causal, numeric
+and temporal at once instead of being filed as temporal and having the rest of
+the sentence discarded - which is what a semantic embedding needs in order to
+put its weight where the question is. It should be re-measured on the semantic
+configuration before the effect is claimed either way.
+
+## What did not move
+
+`cross_lingual`, `fa2en` and `en2fa` are unchanged, as expected: no amount of
+folding makes a Persian token match an English one. Only a semantic embedding
+does, and Phase 2 already measured that (0.900 cross-lingual recall with
+`gemini-embedding-001`). The two `page_boundary` cases stay at zero until
+Phase 5. `abstain_accuracy` stays at 0.125, unchanged since Phase 0 and still
+the weakest number in the suite.
+
+## Multi-query is implemented but unmeasured
+
+Alternative phrasings come from the LLM rewriter, which needs a provider. The
+fusion itself is covered by unit tests and the rule-based path produces no
+variants, so every number above is single-query. `--rewrite llm` measures the
+other path when a key is available.
+
+## Cost
+
+The rewriter adds one cheap completion per question for non-local providers,
+cached by conversation, message and the turns it was derived from. The offline
+path adds no call at all and costs about 0.1 ms. Folding each chunk at index
+build time is what keeps the query path free of it: p95 latency did not rise.

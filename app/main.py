@@ -17,20 +17,22 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import database
-from .documents import ALLOWED, content_digest, find_duplicate, ingest
-from .embeddings import embedding_info, reindex_all
+from .documents import ALLOWED, content_digest, find_duplicate, ingest, refresh_chunk_tokens
+from .embeddings import embedding_info, is_semantic, reindex_all
 from .index import index as chunk_index
 from .net import ProviderError, redact
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence
 from .search import search
+from .text import NORMALIZER_VERSION
 
 
 logger = logging.getLogger("adaptive_metric_rag")
 
 
 CITATION_REFRESH_KEY = "citation_highlights_refreshed_at"
+NORMALIZER_KEY = "text_normalizer_version"
 
 
 def refresh_saved_citation_highlights() -> None:
@@ -63,12 +65,32 @@ def refresh_saved_citation_highlights() -> None:
             database.execute("UPDATE messages SET citations=? WHERE id=?", (database.json_value(citations), message["id"]))
 
 
+async def upgrade_to_current_normalizer(settings: AppSettings) -> None:
+    """Re-derive what the text normalizer decides, once, after it changes.
+
+    Chunk tokens are computed at ingestion, so a library indexed before the
+    normalizer existed holds `۱۴۰۳` where a question now produces `1403`: BM25
+    would silently stop matching them. Feature-hashed vectors are built from the
+    same tokens and go stale with them, so they are rebuilt too - offline and
+    free. Vectors from a real embedding model do not depend on tokenization and
+    are left untouched, so no start-up ever calls a paid API.
+    """
+    changed = await asyncio.to_thread(refresh_chunk_tokens)
+    if changed and not is_semantic(settings):
+        await reindex_all(settings)
+    if changed:
+        logger.info("re-derived tokens for %d chunks after a normalizer change", changed)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.init_db()
     if not database.meta_get(CITATION_REFRESH_KEY):
         await asyncio.to_thread(refresh_saved_citation_highlights)
         database.meta_set(CITATION_REFRESH_KEY, datetime.now(timezone.utc).isoformat())
+    if database.meta_get(NORMALIZER_KEY) != NORMALIZER_VERSION:
+        await upgrade_to_current_normalizer(load_settings())
+        database.meta_set(NORMALIZER_KEY, NORMALIZER_VERSION)
     await asyncio.to_thread(chunk_index.reload)
     yield
 
@@ -294,12 +316,30 @@ async def get_chunk(chunk_id: str):
     return chunk
 
 
+def conversation_history(conversation_id: str, turns: int) -> list[dict[str, str]]:
+    """The last few turns of an ongoing conversation, oldest first.
+
+    Read straight from storage rather than from the client, so the rewriter and
+    the answer prompt see what was actually said, and a request cannot inject a
+    history that never happened.
+    """
+    if not conversation_id or turns <= 0:
+        return []
+    recent = database.rows(
+        "SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+        (conversation_id, turns),
+    )
+    return [{"role": message["role"], "content": message["content"]} for message in reversed(recent)]
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     started = time.perf_counter()
     settings = load_settings()
+    history = conversation_history(request.conversation_id or "", settings.history_turns)
     try:
-        result = await search(settings, request.message, request.filters)
+        result = await search(settings, request.message, request.filters, history,
+                              request.conversation_id or "")
     except (httpx.HTTPError, ProviderError, KeyError, ValueError) as exc:
         raise HTTPException(502, f"Retrieval failed: {redact(exc)}") from exc
 
@@ -307,11 +347,12 @@ async def chat(request: ChatRequest):
     grounded_chunks = result.chunks
     if evidence_found:
         try:
-            answer = await generate(settings, request.message, grounded_chunks, result.analysis.language)
+            answer = await generate(settings, request.message, grounded_chunks, result.analysis.language, history)
         except (httpx.HTTPError, ProviderError, KeyError, ValueError) as first_exc:
             logger.warning("Generation failed; retrying with reduced context: %r", first_exc, exc_info=True)
             try:
-                answer = await generate(settings, request.message, grounded_chunks[:2], result.analysis.language)
+                answer = await generate(settings, request.message, grounded_chunks[:2],
+                                        result.analysis.language, history)
             except (httpx.HTTPError, ProviderError, KeyError, ValueError) as retry_exc:
                 logger.error("Generation retry failed; using grounded extractive fallback: %r", retry_exc, exc_info=True)
                 answer = local_answer(request.message, grounded_chunks, result.analysis.language)
@@ -320,10 +361,13 @@ async def chat(request: ChatRequest):
     if evidence_found and answer_abstained(answer):
         evidence_found = False
         grounded_chunks = []
+    # Highlighting reads the retrieved question: for a follow-up, the words that
+    # located the passage are the ones the conversation supplied, not «و مبلغش؟».
+    highlight_query = result.plan.question if result.plan else request.message
     citations = [Citation(
         id=i, document_id=chunk["document_id"], document_name=chunk["document_name"], chunk_id=chunk["id"],
         page=chunk.get("page"), section=chunk.get("section"), excerpt=chunk["content"][:420],
-        highlight=best_evidence(request.message, chunk["content"], claim_for_citation(answer, i)), score=chunk["score"],
+        highlight=best_evidence(highlight_query, chunk["content"], claim_for_citation(answer, i)), score=chunk["score"],
     ) for i, chunk in enumerate(grounded_chunks, 1)]
     conversation_id = request.conversation_id or uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()

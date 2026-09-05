@@ -18,7 +18,7 @@ from . import database
 from .embeddings import create_embeddings, document_embedding_text
 from .index import index
 from .models import AppSettings
-from .retrieval import tokenize
+from .text import tokenize
 
 
 ALLOWED = {".txt", ".md", ".pdf", ".docx", ".csv", ".json", ".html", ".htm"}
@@ -90,6 +90,25 @@ def find_duplicate(digest: str) -> dict | None:
         if metadata.get("sha256") == digest:
             return document
     return None
+
+
+def refresh_chunk_tokens() -> int:
+    """Recompute every chunk's stored tokens with the current normalizer.
+
+    Returns the number of chunks whose tokens actually changed, so the caller
+    can tell an upgrade from a no-op.
+    """
+    stored = database.rows("SELECT id,content,tokens FROM chunks")
+    updates = []
+    for chunk in stored:
+        tokens = database.json_value(tokenize(chunk["content"]))
+        if tokens != chunk["tokens"]:
+            updates.append((tokens, chunk["id"]))
+    if updates:
+        with database.connect() as db:
+            db.executemany("UPDATE chunks SET tokens=? WHERE id=?", updates)
+        index.invalidate()
+    return len(updates)
 
 
 async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: int, overlap: int,

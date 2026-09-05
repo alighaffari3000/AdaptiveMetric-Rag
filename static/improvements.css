@@ -10,6 +10,7 @@
 .retrieval-details .answer-meta{margin:0;padding:10px 12px;border-top:1px solid var(--line);background:#0b101a}
 .retrieval-details .answer-meta p{width:100%;margin:3px 0 0;color:#677186;font-size:9px}
 .retrieval-details .answer-meta .confidence-explanation{margin-top:8px;padding-top:8px;border-top:1px dashed #293044;color:#8e98aa;line-height:1.8}
+.retrieval-details .answer-meta .rewrite-note{margin-top:8px;color:#8e98aa;line-height:1.8}
 .metric-pill b{color:#c4cad5;font-weight:600;margin-left:3px}
 .sources-section{width:100%;min-width:0}
 .sources-section summary span{color:#c6ccd7;font-weight:600}.sources-section summary b{display:grid;place-items:center;min-width:22px;height:20px;border-radius:7px;background:#7258ed22;color:#aa98ff}

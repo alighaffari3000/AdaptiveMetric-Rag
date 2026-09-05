@@ -10,6 +10,8 @@ python -m eval.run_eval                       # score the golden set, print a su
 python -m eval.run_eval --verbose             # also list failing cases
 python -m eval.run_eval --tag cross_lingual   # score one slice
 python -m eval.run_eval --json eval/results/run.json --markdown eval/results/run.md
+python -m eval.run_eval --rewrite off         # score questions exactly as written
+python -m eval.run_eval --rewrite llm         # measure the model-driven rewriter
 python -m eval.bench_latency                  # latency at 1k / 5k / 20k chunks
 python -m eval.make_fixtures                  # regenerate the two-page PDF fixture
 pytest -m eval                                # the same golden run as a test
@@ -44,10 +46,15 @@ a binary. Its cold-chain explanation deliberately straddles the page break.
 | `doc` | filename of the document that holds the answer |
 | `must_contain` | every string must appear in a chunk for it to count as relevant |
 | `any_contain` | at least one string must appear |
-| `history` | prior conversation turns, for follow-up cases |
+| `history` | prior conversation turns; the rewriter resolves the question against them |
 | `expect_abstain` | true when the corpus cannot answer the question |
 | `blocked_by` | phase that will make this case satisfiable; scored as a failure until then |
 | `tags` | slices reported separately |
+
+Cases carrying `history` are run through the offline rewriter by default, which
+is what a `local` deployment does. `--rewrite off` scores the question as typed -
+useful for separating a retrieval change from a rewriting one - and `--rewrite
+llm` measures the model-driven rewriter, which costs one completion per case.
 
 **Relevance is judged by content, never by chunk id.** Chunk ids change whenever
 chunking, embeddings, or ingestion change; the golden file has to survive that.

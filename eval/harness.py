@@ -288,16 +288,31 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
 
 
 async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | None = None,
-                    context_count: int = 10, cache: EmbeddingCache | None = None) -> list[CaseOutcome]:
-    """Score the full pipeline: embed, fuse, rerank when enabled, and gate."""
+                    context_count: int = 10, cache: EmbeddingCache | None = None,
+                    rewrite: str = "rules") -> list[CaseOutcome]:
+    """Score the full pipeline: rewrite, embed, fuse, rerank when enabled, and gate.
+
+    `rewrite` selects how a case's conversation history is used: "rules" for the
+    offline rewriter (the default, so a run stays reproducible and free), "llm"
+    to measure the model-driven rewriter, or "off" to score the question exactly
+    as the golden set states it.
+    """
     from app.embeddings import create_query_embedding, is_semantic
     from app.rerank import blend, rerank_scores
-    from app.retrieval import retrieve, score_confidence, select_grounded, RetrievalResult
+    from app.rewrite import QueryPlan, plan_query, rule_plan
+    from app.retrieval import fuse_results, retrieve, score_confidence, select_grounded, RetrievalResult
 
     async def embed_query(question: str) -> list[float]:
         if cache is not None and cache.enabled and is_semantic(settings):
             return (await cache.embed(settings, [question], kind="query"))[0]
         return await create_query_embedding(settings, question)
+
+    async def plan_for(case: GoldenCase) -> QueryPlan:
+        if rewrite == "off" or not case.history:
+            return QueryPlan(question=case.question, original=case.question)
+        if rewrite == "llm":
+            return await plan_query(settings, case.question, case.history, conversation_id=case.id)
+        return rule_plan(case.question, case.history, settings.history_turns)
 
     semantic = is_semantic(settings)
     dense_weight = settings.semantic_dense_weight if semantic else None
@@ -309,15 +324,20 @@ async def run_cases(cases: list[GoldenCase], settings, candidate_count: int | No
     for case in cases:
         total_relevant = sum(1 for chunk in chunks if case.matches(chunk))
         started = time.perf_counter()
-        vector = await embed_query(case.question)
-        result = retrieve(case.question, candidate_count or settings.candidate_count, depth,
-                          None, vector, dense_weight, fusion)
+        plan = await plan_for(case)
+        questions = list(dict.fromkeys([plan.question] + plan.variants))
+        retrieved = []
+        for question in questions:
+            vector = await embed_query(question)
+            retrieved.append(retrieve(question, candidate_count or settings.candidate_count, depth,
+                                      None, vector, dense_weight, fusion))
+        result = fuse_results(retrieved, depth)
         ranked = result.chunks
         confidence = result.confidence
         if settings.rerank_enabled and len(ranked) > 1:
             shortlist = ranked[:settings.rerank_top_n]
             try:
-                scores = await rerank_scores(settings, case.question, shortlist)
+                scores = await rerank_scores(settings, plan.question, shortlist)
                 ranked = blend(shortlist, scores, settings.rerank_weight) + ranked[settings.rerank_top_n:]
                 confidence = score_confidence(ranked[:context_count],
                                               result.analysis.query_tokens or result.analysis.keywords,

@@ -99,7 +99,8 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"  - {item}")
         print()
 
-    outcomes = await run_cases(cases, settings, context_count=args.context, cache=cache)
+    outcomes = await run_cases(cases, settings, context_count=args.context, cache=cache,
+                               rewrite=args.rewrite)
     report = aggregate(outcomes)
     report["runtime"] = {
         "embedding_provider": settings.embedding_provider,
@@ -112,6 +113,7 @@ async def main_async(args: argparse.Namespace) -> int:
                    "model": settings.rerank_model or settings.model,
                    "top_n": settings.rerank_top_n, "weight": settings.rerank_weight}
         if settings.rerank_enabled else None,
+        "rewrite": args.rewrite,
         "documents": len(documents),
         "chunks": sum(doc["chunks"] for doc in documents),
     }
@@ -184,6 +186,8 @@ def main() -> int:
     parser.add_argument("--rerank-model", help="model the reranker should use")
     parser.add_argument("--provider", help="override the generation provider (for the llm reranker)")
     parser.add_argument("--model", help="override the generation model")
+    parser.add_argument("--rewrite", choices=["off", "rules", "llm"], default="rules",
+                        help="how a case's conversation history is used (default: the offline rewriter)")
     parser.add_argument("--no-cache", action="store_true",
                         help="always call the embedding provider instead of reusing cached vectors")
     args = parser.parse_args()

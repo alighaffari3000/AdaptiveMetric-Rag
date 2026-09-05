@@ -18,12 +18,13 @@ import logging
 import math
 import threading
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
 from . import database
+from .text import date_terms, normalize, number_terms
 
 logger = logging.getLogger("adaptive_metric_rag.index")
 
@@ -41,7 +42,14 @@ CHUNK_QUERY = (
 
 @dataclass
 class Snapshot:
-    """An immutable view a query can score against without holding the lock."""
+    """An immutable view a query can score against without holding the lock.
+
+    Alongside the vectors and postings it carries what the lexical signals need
+    in comparable form: each chunk's folded text and metadata, and the canonical
+    numbers and dates found in it. Folding a chunk costs a few regex passes, and
+    doing it per query would repeat that work for every candidate on every
+    question; here it happens once when the index is built.
+    """
 
     rows: list[dict[str, Any]]
     matrix: np.ndarray
@@ -50,6 +58,10 @@ class Snapshot:
     doc_freq: dict[str, int]
     avg_len: float
     stale_vectors: int
+    folded: list[str] = field(default_factory=list)
+    folded_meta: list[str] = field(default_factory=list)
+    numbers: list[frozenset[str]] = field(default_factory=list)
+    dates: list[frozenset[str]] = field(default_factory=list)
 
     @property
     def size(self) -> int:
@@ -182,6 +194,10 @@ def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
     rows: list[dict[str, Any]] = []
     lengths = np.zeros(len(raw_rows), dtype=np.float64)
     postings_build: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    folded: list[str] = []
+    folded_meta: list[str] = []
+    numbers: list[frozenset[str]] = []
+    dates: list[frozenset[str]] = []
 
     for position, (raw, vector) in enumerate(zip(raw_rows, vectors)):
         if vector.shape[0] == dimension:
@@ -193,6 +209,13 @@ def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
         row = {key: raw[key] for key in raw if key not in {"vector", "tokens"}}
         row["tokens"] = tokens
         rows.append(row)
+        content = raw["content"]
+        folded.append(normalize(content))
+        folded_meta.append(normalize(
+            f'{raw.get("document_name") or ""} {raw.get("section") or ""} {raw.get("document_type") or ""}'
+        ))
+        numbers.append(frozenset(number_terms(content)))
+        dates.append(frozenset(date_terms(content)))
 
     postings = {
         term: (
@@ -210,6 +233,10 @@ def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
         doc_freq=doc_freq,
         avg_len=float(lengths.mean()),
         stale_vectors=stale,
+        folded=folded,
+        folded_meta=folded_meta,
+        numbers=numbers,
+        dates=dates,
     )
 
 

@@ -8,7 +8,12 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 
 ## What is included
 
-- Adaptive query analyzer with factual, conceptual, causal, numeric, temporal, and technical/code intents
+- Adaptive query analyzer with factual, conceptual, causal, numeric, temporal, and technical/code
+  intents, scored independently so one question can be several of them at once
+- Conversation-aware rewriting: a follow-up such as "and its cost?" is made standalone from the
+  recent turns before retrieval, offline by default and by the answer model when one is configured
+- One Persian text normalizer behind ingestion, BM25 and every lexical signal: Arabic ی/ک, the half
+  space, kashida, harakat, and ۱۴۰۳/١٤٠٣/1403 all compare equal, and ۱۵ خرداد ۱۴۰۲ matches ۱۴۰۲/۰۳/۱۵
 - Per-query mixture of dense, BM25, entity, numeric, temporal, and metadata signals,
   fused by rank so no signal wins on the scale it happens to use
 - Optional second-stage reranking by a local cross-encoder or by the answer model
@@ -30,7 +35,7 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 ## Architecture
 
 ```text
-Query → Query Analyzer → Metric Router
+Query + recent turns → Rewriter → Query Analyzer → Metric Router
                             │
           Dense + BM25 + Entity + Number + Time + Metadata
                             │
@@ -140,6 +145,10 @@ API keys submitted through the interface are stored server-side and never return
 | Confidence threshold | 0.58 | Threshold exposed for confidence-aware flows |
 | Early exit | On | Marks decisive retrievals so expensive optional stages can be skipped |
 | Query expansion | On | Enables expansion behavior in confidence-aware extensions |
+| Query rewrite | On | Makes a follow-up question standalone from the conversation before retrieval |
+| Multi-query | On | Retrieves the model's alternative phrasings too and merges them by rank |
+| History turns | 4 | Messages of the conversation the rewriter and the answer prompt may see |
+| Strict multi-part answers | Off | Treats a short answer to a two-part question as truncated and repairs it |
 
 Chunk settings apply to newly uploaded documents. Re-upload existing documents after changing them.
 

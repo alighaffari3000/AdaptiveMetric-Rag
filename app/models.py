@@ -24,6 +24,14 @@ class AppSettings(BaseModel):
     enable_early_exit: bool = True
     confidence_threshold: float = Field(0.58, ge=0, le=1)
     enable_query_expansion: bool = True
+    # Conversation-aware retrieval. `history_turns` bounds both what the
+    # rewriter sees and what the answer prompt is given.
+    enable_query_rewrite: bool = True
+    enable_multi_query: bool = True
+    history_turns: int = Field(4, ge=0, le=12)
+    # Treat a short answer to a two-part question as truncated. It sends correct
+    # short answers into the repair loop, so it is off unless asked for.
+    strict_multipart_answers: bool = False
     system_prompt: str = "Answer only from the supplied sources. Cite claims using [1], [2], etc. If the sources are insufficient, say so clearly."
     embedding_provider: EmbeddingProviderName = "local"
     embedding_model: str = "multilingual-feature-hashing-v1"
@@ -85,6 +93,19 @@ class QueryAnalysis(BaseModel):
     temporal_terms: list[str]
     keywords: list[str] = Field(default_factory=list)
     query_tokens: list[str] = Field(default_factory=list)
+    # A question can be causal, numeric and temporal at once. `intent` stays the
+    # leading one so existing readers keep working; `intents` lists every active
+    # one and `intent_shares` how much of the weight vector each contributed.
+    intents: list[str] = Field(default_factory=list)
+    intent_shares: dict[str, float] = Field(default_factory=dict)
+    rewritten_from: str = ""
+    rewrite_source: str = ""
+
+    @field_validator("intents")
+    @classmethod
+    def default_to_primary(cls, value: list[str], info: Any) -> list[str]:
+        primary = info.data.get("intent")
+        return value or ([primary] if primary else [])
 
 
 class ChatResponse(BaseModel):

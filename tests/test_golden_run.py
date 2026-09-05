@@ -56,10 +56,16 @@ def test_golden_set_is_consistent_with_the_corpus(report):
 
 def test_retrieval_does_not_regress_below_the_recorded_baseline(report):
     summary = report["summary"]
-    assert summary["hit@5"] >= 0.78, summary
-    assert summary["mrr"] >= 0.69, summary
-    assert summary["ndcg@10"] >= 0.71, summary
+    assert summary["hit@5"] >= 0.82, summary
+    assert summary["mrr"] >= 0.72, summary
+    assert summary["ndcg@10"] >= 0.75, summary
 
 
 def test_english_monolingual_slice_stays_saturated(report):
     assert report["by_tag"]["en2en"]["hit@5"] >= 0.95, report["by_tag"]["en2en"]
+
+
+def test_follow_up_questions_meet_the_phase_4_criterion(report):
+    """Recall@5 above 0.7 on the questions that only mean something in context."""
+    follow_up = report["by_tag"]["follow_up"]
+    assert follow_up["recall@5"] >= 0.70, follow_up

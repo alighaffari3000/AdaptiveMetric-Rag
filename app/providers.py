@@ -23,7 +23,16 @@ def _has_complete_ending(answer: str) -> bool:
     return tail.endswith((".", "!", "?", "؟", "؛", "…", ")", "]", "}", "»", '"', "'"))
 
 
-def _looks_incomplete(question: str, answer: str, finish_reason: str = "") -> bool:
+def _looks_incomplete(question: str, answer: str, finish_reason: str = "",
+                      strict_multipart: bool = False) -> bool:
+    """Whether the answer was cut off, as opposed to merely being short.
+
+    Length alone used to count: a two-part question whose answer ran under 350
+    characters was sent back for repair. Two dates and two amounts are a
+    complete answer to a two-part question, so the rule was rewriting correct
+    answers and paying for a second call to do it. It is now opt-in through
+    `strict_multipart_answers`; the structural checks below stand on their own.
+    """
     clean = answer.strip()
     if not clean:
         return True
@@ -33,7 +42,8 @@ def _looks_incomplete(question: str, answer: str, finish_reason: str = "") -> bo
     broken_ending = clean.endswith(("(", "[", "{", ":", "،", ",", "-", "**"))
     multi_part = question.count("؟") + question.count("?") >= 2
     missing_sentence_end = not _has_complete_ending(clean)
-    return unbalanced or broken_ending or missing_sentence_end or (multi_part and len(clean) < 350)
+    return (unbalanced or broken_ending or missing_sentence_end
+            or (strict_multipart and multi_part and len(clean) < 350))
 
 
 def _repair_instruction(language: str) -> str:
@@ -101,17 +111,40 @@ def _finalize_answer(answer: str) -> str:
     return clean
 
 
-def build_prompt(question: str, chunks: list[dict[str, Any]], system_prompt: str, language: str) -> tuple[str, str]:
+def _history_block(history: list[dict[str, str]] | None, language: str) -> str:
+    """The recent turns, so a follow-up reads as a follow-up.
+
+    Retrieval already resolved the question against the conversation; the model
+    needs the same context to write «مبلغ همان قرارداد ...» instead of asking
+    which contract is meant. The sources still decide the facts: the history is
+    labelled as background, never as material to answer from.
+    """
+    turns = [turn for turn in (history or []) if turn.get("content")]
+    if not turns:
+        return ""
+    lines = "\n".join(f"{turn.get('role', 'user')}: {turn['content'].strip()}" for turn in turns)
+    if language == "fa":
+        return ("\n\nگفت‌وگوی پیشین (فقط برای فهم منظور سؤال؛ پاسخ باید تنها از منابع زیر بیاید):\n"
+                f"{lines}")
+    return ("\n\nEarlier conversation (context for understanding the question only; "
+            f"answer strictly from the sources below):\n{lines}")
+
+
+def build_prompt(question: str, chunks: list[dict[str, Any]], system_prompt: str, language: str,
+                 history: list[dict[str, str]] | None = None) -> tuple[str, str]:
     sources = "\n\n".join(
         f"[{i}] Document: {chunk['document_name']} | Page: {chunk.get('page') or '-'}\n{chunk['content']}"
         for i, chunk in enumerate(chunks, 1)
     )
+    context = _history_block(history, language)
     if language == "fa":
-        user = (f"سؤال:\n{question}\n\nمنابع:\n{sources}\n\n"
+        user = (f"سؤال:\n{question}{context}\n\nمنابع:\n{sources}\n\n"
                 "پاسخی کامل، مستقیم و مستند به همین منابع ارائه کن. تمام بخش‌های سؤال را پاسخ بده، "
                 "ارجاع درون‌متنی [1]، [2] درج کن و جمله را نیمه‌تمام رها نکن. پاسخ باید فارسی باشد.")
     else:
-        user = f"Question:\n{question}\n\nSources:\n{sources}\n\nGive a complete, direct answer grounded in these sources. Answer every requested part separately, include inline citations, and do not stop mid-sentence."
+        user = (f"Question:\n{question}{context}\n\nSources:\n{sources}\n\nGive a complete, direct answer "
+                "grounded in these sources. Answer every requested part separately, include inline citations, "
+                "and do not stop mid-sentence.")
     return system_prompt.strip() + "\n\n" + _language_instruction(language), user
 
 
@@ -127,10 +160,12 @@ def local_answer(question: str, chunks: list[dict[str, Any]], language: str) -> 
     return prefix + "\n\n" + "\n\n".join(excerpts)
 
 
-async def generate(settings: AppSettings, question: str, chunks: list[dict[str, Any]], language: str) -> str:
+async def generate(settings: AppSettings, question: str, chunks: list[dict[str, Any]], language: str,
+                   history: list[dict[str, str]] | None = None) -> str:
     if settings.provider == "local":
         return local_answer(question, chunks, language)
-    system, user = build_prompt(question, chunks, settings.system_prompt, language)
+    system, user = build_prompt(question, chunks, settings.system_prompt, language, history)
+    strict = settings.strict_multipart_answers
     timeout = httpx.Timeout(150.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if settings.provider == "ollama":
@@ -144,7 +179,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             payload = response.json()
             answer = payload["message"]["content"]
             done_reason = payload.get("done_reason", "")
-            logger.warning("Ollama generation finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason))
+            logger.warning("Ollama generation finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
             if _wrong_language(language, answer):
                 repair = await post_with_retry(client, f"{base}/api/chat", what="Ollama repair", json={
                     "model": settings.model, "stream": False, "think": False,
@@ -157,9 +192,9 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
                 repaired_payload = repair.json()
                 answer = repaired_payload["message"]["content"]
                 done_reason = repaired_payload.get("done_reason", "")
-                logger.warning("Ollama language repair finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), repaired_payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason))
+                logger.warning("Ollama language repair finished: reason=%s chars=%d eval_count=%s complete=%s", done_reason, len(answer), repaired_payload.get("eval_count"), not _looks_incomplete(question, answer, done_reason, strict))
             for attempt in range(2):
-                if not _looks_incomplete(question, answer, done_reason):
+                if not _looks_incomplete(question, answer, done_reason, strict):
                     break
                 continuation = await post_with_retry(client, f"{base}/api/chat", what="Ollama continuation", json={
                     "model": settings.model, "stream": False, "think": False,
@@ -173,7 +208,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
                 piece = continuation_payload["message"]["content"]
                 answer = _join_continuation(answer, piece)
                 done_reason = continuation_payload.get("done_reason", "")
-                logger.warning("Ollama continuation %d finished: reason=%s piece_chars=%d total_chars=%d complete=%s", attempt + 1, done_reason, len(piece), len(answer), not _looks_incomplete(question, answer, done_reason))
+                logger.warning("Ollama continuation %d finished: reason=%s piece_chars=%d total_chars=%d complete=%s", attempt + 1, done_reason, len(piece), len(answer), not _looks_incomplete(question, answer, done_reason, strict))
             return _finalize_answer(answer)
         if settings.provider == "openai":
             base = (settings.base_url or "https://api.openai.com/v1").rstrip("/")
@@ -185,7 +220,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             payload = response.json()
             choice = payload["choices"][0]
             answer = choice["message"]["content"]
-            if _looks_incomplete(question, answer, choice.get("finish_reason", "")) or _wrong_language(language, answer):
+            if _looks_incomplete(question, answer, choice.get("finish_reason", ""), strict) or _wrong_language(language, answer):
                 repair = await post_with_retry(client, f"{base}/chat/completions", what="OpenAI repair", headers={"Authorization": f"Bearer {settings.api_key}"}, json={
                     "model": settings.model, "temperature": min(settings.temperature, .2), "max_tokens": settings.max_tokens,
                     "messages": [{"role": "system", "content": system}, {"role": "user", "content": user},
@@ -205,7 +240,7 @@ async def generate(settings: AppSettings, question: str, chunks: list[dict[str, 
             payload = response.json()
             candidate = payload["candidates"][0]
             answer = candidate["content"]["parts"][0]["text"]
-            if _looks_incomplete(question, answer, candidate.get("finishReason", "")) or _wrong_language(language, answer):
+            if _looks_incomplete(question, answer, candidate.get("finishReason", ""), strict) or _wrong_language(language, answer):
                 repair_prompt = user + "\n\n" + _repair_instruction(language)
                 repair = await post_with_retry(client, f"{base}/models/{settings.model}:generateContent", what="Gemini repair", params={"key": settings.api_key}, json={
                     "system_instruction": {"parts": [{"text": system}]},

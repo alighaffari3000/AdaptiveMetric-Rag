@@ -131,6 +131,44 @@ def test_citation_highlight_migration_runs_only_once(client):
     assert database.meta_get("citation_highlights_refreshed_at") == stamp
 
 
+def test_a_follow_up_question_is_answered_from_the_conversation(client):
+    """«و کی تموم می‌شه؟» names no contract; the previous turn does."""
+    upload(client, "contract-137.fa.txt", CONTRACT)
+    upload(client, "gpu-runbook.en.md", RUNBOOK)
+    first = client.post("/api/chat", json={"message": "قرارداد شماره ۱۳۷ درباره چیست؟"}).json()
+
+    follow_up = client.post("/api/chat", json={"message": "و کی تموم می‌شه؟",
+                                              "conversation_id": first["conversation_id"]}).json()
+    assert follow_up["evidence_found"] is True
+    assert follow_up["citations"][0]["document_name"] == "contract-137.fa.txt"
+    assert follow_up["analysis"]["rewritten_from"] == "و کی تموم می‌شه؟"
+    assert follow_up["analysis"]["rewrite_source"] == "rules"
+
+
+def test_a_new_conversation_carries_no_context(client):
+    upload(client, "contract-137.fa.txt", CONTRACT)
+    client.post("/api/chat", json={"message": "قرارداد شماره ۱۳۷ درباره چیست؟"})
+    fresh = client.post("/api/chat", json={"message": "و کی تموم می‌شه؟"}).json()
+    assert fresh["analysis"]["rewrite_source"] == ""
+
+
+def test_stored_tokens_are_re_derived_once_after_a_normalizer_change(client):
+    upload(client, "contract-137.fa.txt", CONTRACT)
+    assert database.meta_get("text_normalizer_version")
+
+    # A library written by an older normalizer: Persian digits left as they were.
+    database.execute("UPDATE chunks SET tokens=?", ('["قرارداد","۱۳۷"]',))
+    database.execute("DELETE FROM meta WHERE key='text_normalizer_version'")
+
+    from app.main import app
+
+    with TestClient(app) as restarted:
+        body = restarted.post("/api/chat", json={"message": "مبلغ کل قرارداد چقدر است؟"}).json()
+    assert body["citations"], "re-derived tokens should make the chunk findable again"
+    stored = database.row("SELECT tokens FROM chunks")["tokens"]
+    assert "137" in stored and "۱۳۷" not in stored
+
+
 def test_unsupported_upload_is_rejected(client):
     response = client.post("/api/documents", files={"file": ("notes.xyz", b"data", "text/plain")})
     assert response.status_code == 415

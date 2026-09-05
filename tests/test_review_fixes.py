@@ -142,7 +142,7 @@ def test_client_facing_retrieval_error_is_redacted(fresh_db):
     from app import search as search_module
     from app.main import app
 
-    async def failing(settings, query, filters=None):
+    async def failing(settings, query, filters=None, history=None, conversation_id=""):
         raise httpx.ConnectError("boom for url 'https://x.test/embed?key=leaked-key'")
 
     original = search_module.search

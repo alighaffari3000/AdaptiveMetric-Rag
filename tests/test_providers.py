@@ -19,8 +19,11 @@ def test_continuation_is_joined_and_dangling_tail_is_removed():
     assert _finalize_answer(joined + " این جمله ناتمام") == joined
 
 
-def test_detects_short_multi_part_answer():
-    assert _looks_incomplete("نویسنده کیست؟ ناشر چیست؟ ISBN چند است؟", "نویسنده سینتیا پن است.")
+def test_short_multi_part_answer_is_only_incomplete_when_asked_for():
+    """A short answer to a two-part question is short, not necessarily truncated."""
+    question = "نویسنده کیست؟ ناشر چیست؟ ISBN چند است؟"
+    assert not _looks_incomplete(question, "نویسنده سینتیا پن است.")
+    assert _looks_incomplete(question, "نویسنده سینتیا پن است.", strict_multipart=True)
 
 
 def test_accepts_complete_answer():

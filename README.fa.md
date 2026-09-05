@@ -8,7 +8,12 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 
 ## قابلیت‌ها
 
-- Query Analyzer برای intentهای factual، conceptual، causal، numeric، temporal و technical/code
+- Query Analyzer چندبرچسبی برای intentهای factual، conceptual، causal، numeric، temporal و technical/code؛
+  هر نیت مستقل امتیاز می‌گیرد، پس یک سؤال می‌تواند هم‌زمان چند نیت داشته باشد
+- حافظه مکالمه: سؤال پیگیری مثل «و مبلغش چقدر بود؟» پیش از بازیابی با کمک نوبت‌های قبلی مستقل می‌شود؛
+  به‌صورت پیش‌فرض آفلاین و بدون هزینه، و در صورت تنظیم تأمین‌کننده، با خود مدل
+- یک نرمال‌ساز واحد فارسی پشت ingest، BM25 و همه سیگنال‌های واژگانی: ی/ک عربی، نیم‌فاصله، کشیده، اعراب و
+  ۱۴۰۳/١٤٠٣/1403 یکسان مقایسه می‌شوند و «۱۵ خرداد ۱۴۰۲» با «۱۴۰۲/۰۳/۱۵» تطابق پیدا می‌کند
 - ترکیب پویا از Dense، BM25، Entity، Number، Time و Metadata
 - جستجوی چندکلیدواژه‌ای فارسی/انگلیسی و ترکیب چند بردار Query برای retrieval بین‌زبانی
 - مسیر سه‌مرحله‌ای candidate retrieval، adaptive scoring و grounded generation
@@ -26,7 +31,7 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 ## معماری
 
 ```text
-Query → Query Analyzer → Metric Router
+Query + نوبت‌های اخیر → Rewriter → Query Analyzer → Metric Router
                             │
           Dense + BM25 + Entity + Number + Time + Metadata
                             │

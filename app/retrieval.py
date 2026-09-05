@@ -10,11 +10,9 @@ import numpy as np
 
 from .index import index
 from .models import QueryAnalysis
+from .text import date_terms, language_of, normalize, number_terms, tokenize
 
 
-TOKEN_RE = re.compile(r"[\w\u0600-\u06FF.-]+", re.UNICODE)
-DATE_RE = re.compile(r"(?:\b(?:19|20)\d{2}\b|\b1[34]\d{2}\b|\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4})")
-NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
 DIMENSION = 384
 
 # Measured on eval/golden.jsonl; see eval/BASELINE.md. A top chunk about four
@@ -28,10 +26,7 @@ EARLY_EXIT_MARGIN = .04
 # keeping 98 percent of the relevant ones (eval/BASELINE.md).
 CITATION_STANDOUT_GAP = 1.5
 
-PERSIAN_STOP = {"از", "به", "در", "با", "برای", "که", "این", "آن", "را", "و", "یا", "چه", "چرا", "چگونه", "است", "شد", "می"}
-ENGLISH_STOP = {"the", "a", "an", "of", "to", "in", "for", "is", "was", "and", "or", "what", "why", "how", "does"}
-
-KEYWORD_EXPANSIONS = {
+_KEYWORD_EXPANSIONS = {
     "کتاب": ["book", "title"], "متن": ["text", "passage", "content"],
     "موضوع": ["topic", "subject", "about"], "خلاصه": ["summary", "overview"],
     "نویسنده": ["author", "written"], "ناشر": ["publisher", "publication"],
@@ -44,25 +39,29 @@ KEYWORD_EXPANSIONS = {
     "چطور": ["how", "ways", "methods"], "چگونه": ["how", "ways", "methods"],
     "باشیم": ["become", "being"],
 }
+# The table is written the way a reader writes it; lookups happen on folded
+# text, where «وب‌سایت» is «وب سایت», so the keys are folded once here.
+KEYWORD_EXPANSIONS: dict[str, list[str]] = {}
+for _source, _expansions in _KEYWORD_EXPANSIONS.items():
+    KEYWORD_EXPANSIONS.setdefault(normalize(_source), []).extend(_expansions)
 
 
 def normalize_query(query: str) -> str:
-    normalized = query.strip().lower().replace("ي", "ی").replace("ك", "ک")
-    normalized = re.sub(r"^(?:خوب|خب|خب،|خوب،|لطفاً|لطفا|ببین|راستی)\s+", "", normalized)
-    normalized = normalized.replace("چطوری", "چطور").replace("چه جوری", "چطور").replace("چجوری", "چطور")
-    return re.sub(r"\s+", " ", normalized).strip()
+    """Fold the question, then drop the openers a person types before it."""
+    normalized = normalize(query)
+    normalized = re.sub(r"^(?:خوب|خب|خب،|خوب،|لطفا|ببین|راستی)\s+", "", normalized)
+    return normalized.replace("چطوری", "چطور").replace("چه جوری", "چطور").replace("چجوری", "چطور").strip()
 
 
 def expanded_keywords(query: str) -> list[str]:
     """Extract multiple distinct keywords and add compact cross-language variants."""
     query = normalize_query(query)
     keywords = list(dict.fromkeys(tokenize(query)))
-    lowered = query.lower()
     for source, expansions in KEYWORD_EXPANSIONS.items():
-        if source in lowered:
+        if source in query:
             keywords.extend(expansions)
     quoted = re.findall(r'["«](.*?)["»]', query)
-    keywords.extend(item.strip().lower() for item in quoted if item.strip())
+    keywords.extend(item.strip() for item in quoted if item.strip())
     return list(dict.fromkeys(keywords))[:24]
 
 
@@ -77,18 +76,13 @@ def query_variants(query: str) -> list[str]:
     return list(dict.fromkeys(variant for variant in variants if variant))
 
 
-def tokenize(text: str) -> list[str]:
-    normalized = text.lower().replace("ي", "ی").replace("ك", "ک")
-    return [t for t in TOKEN_RE.findall(normalized) if len(t) > 1 and t not in PERSIAN_STOP and t not in ENGLISH_STOP]
-
-
 def best_evidence(query: str, content: str, answer: str = "") -> str:
     """Pick the sentence most responsible for a chunk matching the query."""
     query_terms = set(tokenize(query))
     answer_terms = set(tokenize(re.sub(r"\[\d+\]", "", answer)))
     important_terms = query_terms | answer_terms
-    important_numbers = set(NUMBER_RE.findall(query + " " + answer))
-    important_dates = set(DATE_RE.findall(query + " " + answer))
+    important_numbers = set(number_terms(query + " " + answer))
+    important_dates = set(date_terms(query + " " + answer))
     sentences = [part.strip() for part in re.split(r"(?<=[.!?؟؛])\s+|\n+", content) if part.strip()]
     if not sentences:
         return content[:320]
@@ -98,8 +92,8 @@ def best_evidence(query: str, content: str, answer: str = "") -> str:
         answer_overlap = len(answer_terms & terms) / max(len(answer_terms), 1)
         query_overlap = len(query_terms & terms) / max(len(query_terms), 1)
         combined_overlap = len(important_terms & terms) / max(len(important_terms), 1)
-        sentence_numbers = set(NUMBER_RE.findall(sentence))
-        sentence_dates = set(DATE_RE.findall(sentence))
+        sentence_numbers = set(number_terms(sentence))
+        sentence_dates = set(date_terms(sentence))
         number_bonus = .55 if important_numbers and important_numbers & sentence_numbers else 0
         date_bonus = .45 if important_dates and important_dates & sentence_dates else 0
         return .55 * answer_overlap + .30 * query_overlap + .15 * combined_overlap + number_bonus + date_bonus, -len(sentence)
@@ -126,77 +120,147 @@ def cosine(a: list[float], b: list[float]) -> float:
     return max(0.0, sum(x * y for x, y in zip(a, b)))
 
 
+# One weight vector per intent. A question is rarely exactly one of these, so
+# the vectors are mixed rather than chosen; see `route`.
+INTENT_WEIGHTS: dict[str, dict[str, float]] = {
+    "document_browse": {"dense": .52, "bm25": .08, "keyword": .18, "entity": .03, "numeric": .02, "temporal": .02, "metadata": .15},
+    "temporal_fact": {"dense": .16, "bm25": .10, "keyword": .10, "entity": .22, "numeric": .07, "temporal": .28, "metadata": .07},
+    "numeric_fact": {"dense": .15, "bm25": .11, "keyword": .10, "entity": .22, "numeric": .28, "temporal": .06, "metadata": .08},
+    "causal": {"dense": .41, "bm25": .15, "keyword": .12, "entity": .15, "numeric": .03, "temporal": .05, "metadata": .09},
+    "technical_code": {"dense": .27, "bm25": .27, "keyword": .11, "entity": .21, "numeric": .05, "temporal": .02, "metadata": .07},
+    "conceptual": {"dense": .52, "bm25": .13, "keyword": .12, "entity": .07, "numeric": .02, "temporal": .02, "metadata": .12},
+    "exact_fact": {"dense": .25, "bm25": .19, "keyword": .11, "entity": .23, "numeric": .07, "temporal": .06, "metadata": .09},
+}
+
+INTENT_CUES: dict[str, tuple[str, ...]] = {
+    "document_browse": ("from the book", "book passage", "from the text", "quote from", "متن کتاب",
+                        "از متن", "از کتاب", "بخشی از", "برام بنویس", "برایم بنویس"),
+    "temporal_fact": ("when", "date", "expire", "released", "زمان", "تاریخ", "پایان", "منقضی", "منتشر"),
+    "numeric_fact": ("how much", "price", "dose", "count", "fee", "amount", "قیمت", "دوز", "مقدار",
+                     "چقدر", "مبلغ", "هزینه"),
+    "causal": ("why", "cause", "reason", "چرا", "علت", "دلیل"),
+    "technical_code": ("error", "exception", "stack", "cuda", "api", "function", "خطا", "کد"),
+    "conceptual": ("how does", "explain", "concept", "topic", "subject", "summary",
+                   "چگونه", "چطور", "مفهوم", "توضیح", "موضوع", "درباره", "خلاصه", "چی هست", "چیه", "خلاق"),
+}
+
+# Ties are broken by the order the old if/elif chain used, so a question that
+# fires exactly one intent is routed exactly as it was before.
+INTENT_PRIORITY = ("document_browse", "temporal_fact", "numeric_fact", "causal",
+                   "technical_code", "conceptual", "exact_fact")
+
+CUE_EVIDENCE = 1.0        # a word that names the intent
+EXTRA_CUE_EVIDENCE = .1   # each further cue for the same intent
+DATE_EVIDENCE = 1.0       # a date in the question is as explicit as saying "when"
+NUMBER_EVIDENCE = .7      # a bare number is weaker: identifiers look like numbers too
+ENTITY_EVIDENCE = .6
+BROWSE_EVIDENCE = 3.0     # browsing used to override every other intent outright
+ACTIVE_FLOOR = 1.0        # an intent joins the mix once it has a cue's worth of evidence
+
+
+def route(query: str, numbers: list[str], dates: list[str], entities: list[str]) -> dict[str, float]:
+    """Score every intent independently and return the active ones as shares.
+
+    The old router was an if/elif chain, so a question like
+
+        چرا مبلغ قرارداد ۱۳۷ در سال ۱۴۰۳ تغییر کرد؟
+
+    was filed as purely temporal: the first branch that matched won, and the
+    causal and numeric parts of the same sentence were discarded along with the
+    weights that would have found the answer. Here each intent collects its own
+    evidence, and the ones that clear `ACTIVE_FLOOR` share the vote in
+    proportion to it, so a question can be all three at once.
+
+    When nothing clears the floor - a question carrying a number and no telling
+    words - the best-supported intent is used alone rather than falling through
+    to a generic default.
+    """
+    scores: dict[str, float] = {}
+    for intent, cues in INTENT_CUES.items():
+        hits = sum(1 for cue in cues if cue in query)
+        if hits:
+            scores[intent] = CUE_EVIDENCE + EXTRA_CUE_EVIDENCE * (hits - 1)
+    if "document_browse" in scores:
+        scores["document_browse"] *= BROWSE_EVIDENCE
+    if dates:
+        scores["temporal_fact"] = scores.get("temporal_fact", 0.0) + DATE_EVIDENCE
+    if numbers:
+        scores["numeric_fact"] = scores.get("numeric_fact", 0.0) + NUMBER_EVIDENCE
+    if entities:
+        scores["exact_fact"] = scores.get("exact_fact", 0.0) + ENTITY_EVIDENCE
+    if not scores:
+        return {"exact_fact": 1.0}
+
+    active = {intent: score for intent, score in scores.items() if score >= ACTIVE_FLOOR}
+    if not active:
+        best = max(scores.values())
+        leader = min((i for i, s in scores.items() if s == best), key=INTENT_PRIORITY.index)
+        return {leader: 1.0}
+    total = sum(active.values())
+    return {intent: score / total for intent, score in active.items()}
+
+
+def blend_weights(shares: dict[str, float]) -> dict[str, float]:
+    """Mix the intent weight vectors by how much of the question each explains."""
+    blended = {signal: 0.0 for signal in INTENT_WEIGHTS["exact_fact"]}
+    for intent, share in shares.items():
+        for signal, weight in INTENT_WEIGHTS[intent].items():
+            blended[signal] += share * weight
+    return {signal: round(weight, 4) for signal, weight in blended.items()}
+
+
 def analyze_query(query: str) -> QueryAnalysis:
+    raw = query
     query = normalize_query(query)
-    q = query.lower()
-    language = "fa" if re.search(r"[\u0600-\u06FF]", query) else "en"
-    numbers = NUMBER_RE.findall(query)
-    temporal = DATE_RE.findall(query)
-    quoted = re.findall(r'["«](.*?)["»]', query)
+    language = language_of(query)
+    numbers = number_terms(query)
+    temporal = date_terms(query)
+    quoted = re.findall(r'["\u00ab](.*?)["\u00bb]', query)
     tokens = tokenize(query)
-    caps = re.findall(r"\b[A-Z][A-Za-z0-9_.-]+\b", query)
+    # Capitalisation survives only in the unfolded question, so a name such as
+    # "Northwind" is read from there instead of from the lowercased form, where
+    # the pattern could never match anything.
+    caps = [name.lower() for name in re.findall(r"\b[A-Z][A-Za-z0-9_.-]+\b", raw)]
     entities = list(dict.fromkeys(quoted + caps + [t for t in tokens if any(c.isdigit() for c in t)]))[:8]
     keywords = expanded_keywords(query)
     query_tokens = list(dict.fromkeys(tokens))
 
-    temporal_words = ("when", "date", "expire", "released", "زمان", "تاریخ", "پایان", "منقضی", "منتشر")
-    causal_words = ("why", "cause", "reason", "چرا", "علت", "دلیل")
-    code_words = ("error", "exception", "stack", "cuda", "api", "function", "خطا", "کد")
-    numeric_words = ("how much", "price", "dose", "count", "قیمت", "دوز", "مقدار", "چقدر")
-    conceptual_words = ("how does", "explain", "concept", "topic", "subject", "summary",
-                        "چگونه", "چطور", "مفهوم", "توضیح", "موضوع", "درباره", "خلاصه", "چی هست", "چیه", "خلاق")
-    browse_words = ("from the book", "book passage", "from the text", "quote from", "متن کتاب",
-                    "از متن", "از کتاب", "بخشی از", "برام بنویس", "برایم بنویس")
-
-    if any(w in q for w in browse_words):
-        intent = "document_browse"
-        weights = {"dense": .52, "bm25": .08, "keyword": .18, "entity": .03, "numeric": .02, "temporal": .02, "metadata": .15}
-    elif temporal or any(w in q for w in temporal_words):
-        intent = "temporal_fact"
-        weights = {"dense": .16, "bm25": .10, "keyword": .10, "entity": .22, "numeric": .07, "temporal": .28, "metadata": .07}
-    elif numbers or any(w in q for w in numeric_words):
-        intent = "numeric_fact"
-        weights = {"dense": .15, "bm25": .11, "keyword": .10, "entity": .22, "numeric": .28, "temporal": .06, "metadata": .08}
-    elif any(w in q for w in causal_words):
-        intent = "causal"
-        weights = {"dense": .41, "bm25": .15, "keyword": .12, "entity": .15, "numeric": .03, "temporal": .05, "metadata": .09}
-    elif any(w in q for w in code_words):
-        intent = "technical_code"
-        weights = {"dense": .27, "bm25": .27, "keyword": .11, "entity": .21, "numeric": .05, "temporal": .02, "metadata": .07}
-    elif any(w in q for w in conceptual_words):
-        intent = "conceptual"
-        weights = {"dense": .52, "bm25": .13, "keyword": .12, "entity": .07, "numeric": .02, "temporal": .02, "metadata": .12}
-    else:
-        intent = "exact_fact"
-        weights = {"dense": .25, "bm25": .19, "keyword": .11, "entity": .23, "numeric": .07, "temporal": .06, "metadata": .09}
-    return QueryAnalysis(intent=intent, language=language, weights=weights, entities=entities, numbers=numbers,
-                         temporal_terms=temporal, keywords=keywords, query_tokens=query_tokens)
+    shares = route(query, numbers, temporal, entities)
+    leading = max(shares.values())
+    primary = min((intent for intent, share in shares.items() if share == leading),
+                  key=INTENT_PRIORITY.index)
+    return QueryAnalysis(
+        intent=primary,
+        intents=sorted(shares, key=lambda intent: (-shares[intent], INTENT_PRIORITY.index(intent))),
+        intent_shares={intent: round(share, 3) for intent, share in shares.items()},
+        language=language, weights=blend_weights(shares), entities=entities, numbers=numbers,
+        temporal_terms=temporal, keywords=keywords, query_tokens=query_tokens,
+    )
 
 
 def _overlap(needles: list[str], haystack: str) -> float:
+    """The share of the needles present in already-folded text."""
     if not needles:
         return 0.0
-    low = haystack.lower()
-    return sum(1 for item in needles if item.lower() in low) / len(needles)
+    return sum(1 for item in needles if item in haystack) / len(needles)
 
 
-def _numeric_signal(numbers: list[str], content: str, numeric_intent: bool) -> float:
-    if numbers:
-        return _overlap(numbers, content)
-    return 1.0 if numeric_intent and NUMBER_RE.search(content) else 0.0
+def _term_signal(query_terms: list[str], chunk_terms: frozenset[str], intent_active: bool) -> float:
+    """Share of the question's numbers or dates the chunk actually carries.
 
-
-def _temporal_signal(terms: list[str], content: str, temporal_intent: bool) -> float:
-    if terms:
-        return _overlap(terms, content)
-    return 1.0 if temporal_intent and DATE_RE.search(content) else 0.0
+    Both sides are canonical forms from `app.text`, so ۲٬۴۰۰٬۰۰۰٬۰۰۰ matches
+    2,400,000,000 and «۱۵ خرداد ۱۴۰۲» matches ۱۴۰۲/۰۳/۱۵, while 137 no longer
+    matches 1370 the way substring search did.
+    """
+    if query_terms:
+        return sum(1 for term in query_terms if term in chunk_terms) / len(query_terms)
+    return 1.0 if intent_active and chunk_terms else 0.0
 
 
 def _multi_keyword_signal(keywords: list[str], content: str) -> float:
     if not keywords:
         return 0.0
-    lowered = content.lower()
-    matches = sum(1 for keyword in set(keywords) if keyword.lower() in lowered)
+    matches = sum(1 for keyword in set(keywords) if keyword in content)
     # Requiring up to four distinct terms rewards true multi-keyword matches
     # without penalizing concise queries against a different source language.
     return min(1.0, matches / min(4, len(set(keywords))))
@@ -301,6 +365,51 @@ class RetrievalResult:
     fusion: str = "linear"
 
 
+def fuse_results(results: list[RetrievalResult], context_count: int, k: int = RRF_K) -> RetrievalResult:
+    """Merge the rankings of several phrasings of the same question.
+
+    Multi-query retrieval exists because one phrasing can miss what another
+    finds: an alternative wording of «چرا جلسات طوفان فکری شکست می‌خورند؟» may
+    say «هم‌گرایی زودهنگام» outright. Merging by rank rather than by score is the
+    same argument as in `_weighted_rrf` - the scores of two different questions
+    are not on one scale, but their orderings are comparable.
+
+    A chunk keeps the features and standout it had in the ranking where it did
+    best, so the evidence gate reads the strongest reading of it rather than an
+    average of the phrasings.
+    """
+    usable = [result for result in results if result.chunks]
+    if not usable:
+        return results[0]
+    if len(usable) == 1:
+        return usable[0]
+
+    fused: dict[str, float] = {}
+    best_rank: dict[str, int] = {}
+    representative: dict[str, dict[str, Any]] = {}
+    for result in usable:
+        for rank, chunk in enumerate(result.chunks, 1):
+            key = chunk["id"]
+            fused[key] = fused.get(key, 0.0) + 1.0 / (k + rank)
+            if rank < best_rank.get(key, 10**9):
+                best_rank[key] = rank
+                representative[key] = chunk
+    # Ranking first in every phrasing reads as 1.0, matching `_weighted_rrf`.
+    scale = (k + 1) / len(usable)
+    merged = []
+    for key, score in fused.items():
+        chunk = dict(representative[key])
+        chunk["score"] = round(score * scale, 6)
+        merged.append(chunk)
+    merged.sort(key=lambda item: (-item["score"], best_rank[item["id"]]))
+    selected = merged[:context_count]
+    primary = usable[0]
+    standout = max(result.standout for result in usable)
+    confidence = score_confidence(selected, primary.analysis.query_tokens or primary.analysis.keywords, standout)
+    return RetrievalResult(selected, primary.analysis, round(confidence, 3), primary.early_exit,
+                           standout, primary.fusion)
+
+
 def apply_semantic_profile(weights: dict[str, float], dense_weight: float) -> dict[str, float]:
     """Raise the dense signal to its deserved share when the embedding is semantic.
 
@@ -363,17 +472,19 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     bm_max = max((lexical[position] for position in candidates), default=1) or 1
     scored: list[dict[str, Any]] = []
     signals: dict[str, list[float]] = {name: [] for name in analysis.weights}
+    numeric_intent = "numeric_fact" in analysis.intents
+    temporal_intent = "temporal_fact" in analysis.intents
     for position in candidates:
         row = snapshot.rows[position]
-        content = row["content"]
-        metadata_text = f'{row.get("document_name", "")} {row.get("section") or ""} {row.get("document_type", "")}'
+        content = snapshot.folded[position]
+        metadata_text = snapshot.folded_meta[position]
         features = {
             "dense": float(dense[position]),
             "bm25": float(lexical[position] / bm_max),
             "keyword": _multi_keyword_signal(analysis.keywords, content + " " + metadata_text),
             "entity": _overlap(analysis.entities, content),
-            "numeric": _numeric_signal(analysis.numbers, content, analysis.intent == "numeric_fact"),
-            "temporal": _temporal_signal(analysis.temporal_terms, content, analysis.intent == "temporal_fact"),
+            "numeric": _term_signal(analysis.numbers, snapshot.numbers[position], numeric_intent),
+            "temporal": _term_signal(analysis.temporal_terms, snapshot.dates[position], temporal_intent),
             "metadata": _overlap(qtokens[:6], metadata_text),
         }
         for name, value in features.items():
@@ -410,16 +521,19 @@ def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]
     confidence preference. Raising that preference must never hide known facts.
     """
     top_features = result.chunks[0]["features"] if result.chunks else {}
+    intents = set(result.analysis.intents) or {result.analysis.intent}
     browse_intent = result.analysis.intent == "document_browse"
     semantic_intent = result.analysis.intent in {"conceptual", "causal", "document_browse"}
     dense_floor = .24 if semantic_intent else .30
     confidence_floor = .08 if semantic_intent else .24
+    # A number or a date is evidence of an answer whenever the question asked
+    # for one, even if that is not the leading reading of the question.
     substantive_match = bool(top_features) and (
         top_features.get("bm25", 0) >= .08
         or top_features.get("entity", 0) >= .50
         or top_features.get("dense", 0) >= dense_floor
-        or (result.analysis.intent == "numeric_fact" and top_features.get("numeric", 0) >= .80)
-        or (result.analysis.intent == "temporal_fact" and top_features.get("temporal", 0) >= .80)
+        or ("numeric_fact" in intents and top_features.get("numeric", 0) >= .80)
+        or ("temporal_fact" in intents and top_features.get("temporal", 0) >= .80)
     )
     evidence_found = bool(result.chunks) and (
         browse_intent or (result.confidence >= confidence_floor and substantive_match)
