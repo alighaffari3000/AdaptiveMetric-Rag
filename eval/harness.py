@@ -87,6 +87,7 @@ class GoldenCase:
     doc: str | None = None
     must_contain: list[str] = field(default_factory=list)
     any_contain: list[str] = field(default_factory=list)
+    relevant_section: str = ""
     history: list[dict[str, str]] = field(default_factory=list)
     expect_abstain: bool = False
     blocked_by: str = ""
@@ -110,6 +111,21 @@ class GoldenCase:
         if self.any_contain and not any(normalize(item) in content for item in self.any_contain):
             return False
         return bool(self.must_contain or self.any_contain or self.doc)
+
+    def section_matches(self, chunk: dict[str, Any]) -> bool:
+        """Whether a chunk sits under the section this case expects.
+
+        Judged by the section title's text, not by any identifier, for the same
+        reason `matches` is: the golden file has to survive a change of chunker.
+        A case that declares no section never matches, so section metrics stay
+        confined to the cases that opted into them.
+        """
+        if not self.relevant_section:
+            return False
+        if self.doc and chunk.get("document_name") != self.doc:
+            return False
+        path = chunk.get("section_path") or chunk.get("section") or ""
+        return normalize(self.relevant_section) in normalize(path)
 
 
 def load_golden(path: Path = GOLDEN_PATH) -> list[GoldenCase]:
@@ -197,7 +213,7 @@ def validate_golden(cases: Iterable[GoldenCase]) -> tuple[list[str], list[str]]:
     blocked: list[str] = []
     for case in cases:
         if case.expect_abstain:
-            if case.doc or case.must_contain or case.any_contain:
+            if case.doc or case.must_contain or case.any_contain or case.relevant_section:
                 problems.append(f"{case.id}: expect_abstain cases must not declare a target document")
             continue
         if not case.doc:
@@ -206,12 +222,17 @@ def validate_golden(cases: Iterable[GoldenCase]) -> tuple[list[str], list[str]]:
         if case.doc not in names:
             problems.append(f"{case.id}: document {case.doc!r} is not in the corpus")
             continue
-        hits = sum(1 for chunk in chunks if case.matches(chunk))
-        if hits == 0:
+        unmet: list[str] = []
+        if not any(case.matches(chunk) for chunk in chunks):
+            unmet.append("no chunk satisfies must_contain/any_contain")
+        if case.relevant_section and not any(case.section_matches(chunk) for chunk in chunks):
+            unmet.append(f"no chunk sits under section {case.relevant_section!r}")
+        if unmet:
+            detail = "; ".join(unmet)
             if case.blocked_by:
-                blocked.append(f"{case.id}: unsatisfiable until {case.blocked_by} ({case.note or 'no note'})")
+                blocked.append(f"{case.id}: {detail} — until {case.blocked_by} ({case.note or 'no note'})")
             else:
-                problems.append(f"{case.id}: no chunk satisfies must_contain/any_contain")
+                problems.append(f"{case.id}: {detail}")
         elif case.blocked_by:
             blocked.append(f"{case.id}: marked blocked_by={case.blocked_by} but the corpus already satisfies it")
     return problems, blocked
@@ -227,13 +248,22 @@ def score_ranking(case: GoldenCase, ranked: list[dict[str, Any]], total_relevant
     found = sum(flags[:k_recall])
     first = next((i + 1 for i, flag in enumerate(flags) if flag), 0)
     ideal = _dcg([1] * min(total_relevant, k_ndcg))
-    return {
+    metrics = {
         "hit@5": 1.0 if found else 0.0,
         "recall@5": found / total_relevant if total_relevant else 0.0,
         "mrr": 1.0 / first if first else 0.0,
         "ndcg@10": (_dcg(flags[:k_ndcg]) / ideal) if ideal else 0.0,
         "first_rank": float(first),
     }
+    if case.relevant_section:
+        # Whether retrieval landed in the right part of the document, which is
+        # what a structure signal is supposed to move. Kept separate from the
+        # content metrics: a chunk can carry the answer text and still be filed
+        # under the wrong heading, and only this pair notices.
+        section_flags = [1 if case.section_matches(chunk) else 0 for chunk in ranked]
+        metrics["section_hit@1"] = float(section_flags[0]) if section_flags else 0.0
+        metrics["section_recall@3"] = 1.0 if any(section_flags[:3]) else 0.0
+    return metrics
 
 
 @dataclass
@@ -261,22 +291,27 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
         index = min(len(values) - 1, max(0, math.ceil(q * len(values)) - 1))
         return round(values[index], 1)
 
+    structural = [o for o in answerable if o.case.relevant_section]
     summary = {
         "cases": len(outcomes),
         "answerable": len(answerable),
         "abstain_cases": len(abstaining),
+        "section_cases": len(structural),
         "hit@5": mean([o.metrics["hit@5"] for o in answerable]),
         "recall@5": mean([o.metrics["recall@5"] for o in answerable]),
         "mrr": mean([o.metrics["mrr"] for o in answerable]),
         "ndcg@10": mean([o.metrics["ndcg@10"] for o in answerable]),
         "answerable_not_abstained": mean([0.0 if o.abstained else 1.0 for o in answerable]),
         "abstain_accuracy": mean([1.0 if o.abstain_correct else 0.0 for o in abstaining]),
+        "section_hit@1": mean([o.metrics.get("section_hit@1", 0.0) for o in structural]),
+        "section_recall@3": mean([o.metrics.get("section_recall@3", 0.0) for o in structural]),
         "latency_p50_ms": pct(latencies, .50),
         "latency_p95_ms": pct(latencies, .95),
     }
     by_tag: dict[str, dict[str, Any]] = {}
     for tag in sorted({tag for o in answerable for tag in o.case.tags}):
         tagged = [o for o in answerable if tag in o.case.tags]
+        sectioned = [o for o in tagged if o.case.relevant_section]
         by_tag[tag] = {
             "cases": len(tagged),
             "hit@5": mean([o.metrics["hit@5"] for o in tagged]),
@@ -284,6 +319,10 @@ def aggregate(outcomes: list[CaseOutcome]) -> dict[str, Any]:
             "mrr": mean([o.metrics["mrr"] for o in tagged]),
             "ndcg@10": mean([o.metrics["ndcg@10"] for o in tagged]),
         }
+        if sectioned:
+            by_tag[tag]["section_cases"] = len(sectioned)
+            by_tag[tag]["section_hit@1"] = mean([o.metrics.get("section_hit@1", 0.0) for o in sectioned])
+            by_tag[tag]["section_recall@3"] = mean([o.metrics.get("section_recall@3", 0.0) for o in sectioned])
     return {"summary": summary, "by_tag": by_tag}
 
 

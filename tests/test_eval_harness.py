@@ -95,3 +95,80 @@ def test_unknown_golden_fields_are_rejected():
         assert "typo_field" in str(exc)
     else:
         raise AssertionError("unknown fields must not be silently accepted")
+
+
+def sectioned(content: str, section_path: str, document_name: str = "doc.txt") -> dict:
+    return {"content": content, "document_name": document_name, "section_path": section_path}
+
+
+def test_relevant_section_is_an_accepted_field():
+    case = GoldenCase.from_json({"id": "s", "question": "q", "language": "fa", "doc": "d.md",
+                                 "must_contain": ["x"], "relevant_section": "فصل دوم > مرخصی"})
+    assert case.relevant_section == "فصل دوم > مرخصی"
+
+
+def test_section_match_reads_the_path_and_folds_spelling():
+    case = GoldenCase(id="s", question="q", language="fa", doc="d.md",
+                      relevant_section="مرخصی استعلاجی")
+    assert case.section_matches(sectioned("متن", "فصل دوم > مرخصی استعلاجی", "d.md"))
+    # Arabic yeh in the corpus path must still match the Persian yeh in the case.
+    assert case.section_matches(sectioned("متن", "فصل دوم > مرخصي استعلاجي", "d.md"))
+    assert not case.section_matches(sectioned("متن", "فصل دوم > مرخصی استحقاقی", "d.md"))
+
+
+def test_section_match_rejects_the_right_section_of_the_wrong_document():
+    case = GoldenCase(id="s", question="q", language="fa", doc="a.md", relevant_section="دورکاری")
+    assert case.section_matches(sectioned("متن", "فصل اول > دورکاری", "a.md"))
+    assert not case.section_matches(sectioned("متن", "فصل اول > دورکاری", "b.md"))
+
+
+def test_a_case_without_a_declared_section_never_matches_one():
+    case = GoldenCase(id="s", question="q", language="fa", doc="d.md", must_contain=["x"])
+    assert not case.section_matches(sectioned("x", "فصل اول", "d.md"))
+
+
+def test_section_match_falls_back_to_the_single_level_section_column():
+    case = GoldenCase(id="s", question="q", language="fa", doc="d.docx", relevant_section="Rollback")
+    assert case.section_matches({"content": "c", "document_name": "d.docx", "section": "Rollback"})
+
+
+def test_section_metrics_are_absent_for_cases_that_declare_no_section():
+    case = GoldenCase(id="s", question="q", language="en", doc="d.txt", must_contain=["target"])
+    metrics = score_ranking(case, [chunk("target", "d.txt")], total_relevant=1)
+    assert "section_hit@1" not in metrics
+    assert "section_recall@3" not in metrics
+
+
+def test_section_hit_at_one_only_counts_the_top_chunk():
+    case = GoldenCase(id="s", question="q", language="fa", doc="d.md",
+                      must_contain=["پاسخ"], relevant_section="مرخصی")
+    right_first = score_ranking(case, [sectioned("پاسخ", "فصل > مرخصی", "d.md"),
+                                       sectioned("پاسخ", "فصل > حقوق", "d.md")], total_relevant=1)
+    right_second = score_ranking(case, [sectioned("پاسخ", "فصل > حقوق", "d.md"),
+                                        sectioned("پاسخ", "فصل > مرخصی", "d.md")], total_relevant=1)
+    assert right_first["section_hit@1"] == 1.0
+    assert right_second["section_hit@1"] == 0.0
+    assert right_first["section_recall@3"] == right_second["section_recall@3"] == 1.0
+
+
+def test_section_recall_at_three_ignores_a_hit_below_the_third_rank():
+    case = GoldenCase(id="s", question="q", language="fa", doc="d.md",
+                      must_contain=["پاسخ"], relevant_section="مرخصی")
+    ranked = [sectioned("پاسخ", "فصل > حقوق", "d.md")] * 3 + [sectioned("پاسخ", "فصل > مرخصی", "d.md")]
+    assert score_ranking(case, ranked, total_relevant=1)["section_recall@3"] == 0.0
+
+
+def test_golden_file_carries_structural_cases_with_sections():
+    cases = load_golden()
+    structural = [case for case in cases if "structural" in case.tags]
+    assert len(structural) >= 15
+    for case in structural:
+        assert case.relevant_section, f"{case.id} is tagged structural but declares no section"
+    assert any("structural_guard" in case.tags for case in cases), \
+        "a flat-document guard case must exist so structure cannot silently regress it"
+
+
+def test_abstain_cases_may_not_declare_a_section():
+    for case in load_golden():
+        if case.expect_abstain:
+            assert not case.relevant_section, f"{case.id} abstains but names a section"
