@@ -4,6 +4,10 @@ These run without a database: they check the yardstick, not the retriever.
 The full golden run lives behind `pytest -m eval`.
 """
 
+import json
+
+import pytest
+
 from eval.harness import GoldenCase, load_golden, score_ranking
 from eval.normalize import contains, normalize
 
@@ -172,3 +176,102 @@ def test_abstain_cases_may_not_declare_a_section():
     for case in load_golden():
         if case.expect_abstain:
             assert not case.relevant_section, f"{case.id} abstains but names a section"
+
+
+# --- machine-drafted candidates (STAIR_PLAN step 4) ------------------------
+
+def test_a_drafted_record_is_dropped_when_the_quote_is_not_in_the_passage():
+    """A quote the model invented would teach the yardstick to accept a miss."""
+    from eval.make_questions import build_positive
+
+    passage = {"document_name": "guide.md", "content": "حداکثر هشت روز در سال",
+               "section_path": "فصل دوم > مرخصی استعلاجی"}
+    assert build_positive(passage, "سقف چند روز است؟", "هشت روز", 0) is not None
+    assert build_positive(passage, "سقف چند روز است؟", "دوازده روز", 0) is None
+    assert build_positive(passage, "", "هشت روز", 0) is None
+    assert build_positive(passage, "سؤال", "", 0) is None
+
+
+def test_a_quote_matches_across_persian_digit_and_letter_variants():
+    from eval.make_questions import build_positive
+
+    passage = {"document_name": "c.txt", "content": "مبلغ ۲٬۴۰۰٬۰۰۰ ریال است", "section_path": ""}
+    assert build_positive(passage, "مبلغ چقدر است؟", "2400000 ریال", 0) is not None
+
+
+def test_a_drafted_record_carries_the_section_it_came_from():
+    from eval.make_questions import build_positive, leaf_section
+
+    passage = {"document_name": "guide.md", "content": "هشت روز",
+               "section_path": "فصل دوم — مرخصی > مرخصی استعلاجی | مرخصی بدون حقوق"}
+    case = build_positive(passage, "چند روز؟", "هشت روز", 0)
+    assert case.relevant_section == "مرخصی استعلاجی"
+    assert "structural" in case.tags
+    assert leaf_section("") == ""
+
+
+def test_a_drafted_record_from_a_flat_passage_declares_no_section():
+    from eval.make_questions import build_positive
+
+    passage = {"document_name": "notes.txt", "content": "هشت روز", "section_path": ""}
+    case = build_positive(passage, "چند روز؟", "هشت روز", 0)
+    assert case.relevant_section == ""
+    assert "flat" in case.tags
+
+
+def test_drafted_records_pass_the_same_validation_as_handwritten_ones():
+    """Whatever the script writes must be loadable by the harness unchanged."""
+    from eval.make_questions import build_negative, build_positive, to_json_line
+
+    passage = {"document_name": "guide.md", "content": "هشت روز در سال",
+               "section_path": "فصل دوم > مرخصی استعلاجی"}
+    drafted = [build_positive(passage, "چند روز؟", "هشت روز", 0), build_negative("نرخ دلار چند است؟", 0)]
+    for case in drafted:
+        reloaded = GoldenCase.from_json(json.loads(to_json_line(case)))
+        assert reloaded.id == case.id
+        assert reloaded.question == case.question
+        assert reloaded.tags == case.tags
+
+
+def test_a_drafted_abstain_record_declares_no_target():
+    from eval.make_questions import build_negative
+
+    case = build_negative("What is the share price?", 3)
+    assert case.expect_abstain
+    assert not case.doc and not case.must_contain and not case.relevant_section
+    assert case.language == "en"
+    assert build_negative("   ", 4) is None
+
+
+@pytest.mark.parametrize("raw", [
+    '{"questions": []}',
+    '```json\n{"questions": []}\n```',
+    'Here you go:\n{"questions": []}\nhope that helps',
+])
+def test_a_wrapped_reply_is_still_read(raw):
+    from eval.make_questions import parse_json_block
+
+    assert parse_json_block(raw) == {"questions": []}
+
+
+@pytest.mark.parametrize("raw", ["not json", "", "[]"])
+def test_an_unusable_reply_raises_instead_of_writing_a_partial_record(raw):
+    from eval.make_questions import parse_json_block
+
+    with pytest.raises(ValueError):
+        parse_json_block(raw)
+
+
+def test_the_generated_file_is_never_the_golden_file():
+    from eval.make_questions import OUTPUT_PATH
+
+    from eval.harness import GOLDEN_PATH
+
+    assert OUTPUT_PATH != GOLDEN_PATH
+    assert OUTPUT_PATH.name == "golden.generated.jsonl"
+
+
+def test_no_generated_record_has_leaked_into_the_golden_set():
+    """A machine label must be promoted by a person, never by a script."""
+    for case in load_golden():
+        assert "generated" not in case.tags, f"{case.id} was drafted, not reviewed"

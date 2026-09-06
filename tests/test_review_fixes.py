@@ -186,3 +186,61 @@ def test_closing_the_thread_connection_resets_transaction_depth(fresh_db):
     with fresh_db.connect() as db:
         db.execute("INSERT INTO meta(key,value) VALUES('after','reset')")
     assert fresh_db.meta_get("after") == "reset"
+
+
+# --- the evidence gate's lexical test (STAIR_PLAN step 4) ------------------
+
+def test_query_coverage_is_absolute_and_ignores_the_rest_of_the_field():
+    """The gate cannot use a score normalised by the best of a bad field."""
+    from app.retrieval import _query_coverage
+
+    tokens = ["مرخصی", "استعلاجی", "سقف"]
+    assert _query_coverage(tokens, "سقف مرخصی استعلاجی هشت روز است") == 1.0
+    assert _query_coverage(tokens, "مرخصی استحقاقی بیست و دو روز") == pytest.approx(1 / 3)
+    assert _query_coverage(tokens, "متن کاملاً نامرتبط") == 0.0
+    assert _query_coverage([], "هر متنی") == 0.0
+
+
+def test_query_coverage_ignores_persian_punctuation_stuck_to_a_token():
+    """TOKEN_RE's Arabic range swallows "؟", so "است؟" arrives as one token."""
+    from app.retrieval import _query_coverage
+
+    with_mark = _query_coverage(["مرخصی", "روز", "است؟"], "مرخصی هشت روز است")
+    without = _query_coverage(["مرخصی", "روز"], "مرخصی هشت روز است")
+    assert with_mark == without == 1.0
+
+
+def test_a_stopword_carrying_a_question_mark_does_not_count_as_a_term():
+    from app.retrieval import _query_coverage
+
+    # "است" is a stopword; "است؟" must not sneak past the list and dilute the
+    # score of a chunk that answers the question.
+    assert _query_coverage(["مبلغ", "است؟"], "مبلغ قرارداد دو میلیارد ریال") == 1.0
+    # A question word that is not on the stopword list still counts, as it must.
+    assert _query_coverage(["مبلغ", "چیست؟"], "مبلغ قرارداد دو میلیارد ریال") == pytest.approx(0.5)
+
+
+def test_the_gate_refuses_a_top_chunk_that_shares_almost_nothing_with_the_query(fresh_db):
+    """A relative bm25 read 1.0 for the top chunk of 81% of golden queries."""
+    import json as json_module
+
+    from app.index import index as chunk_index
+    from app.retrieval import embed, retrieve, select_grounded, tokenize
+
+    fresh_db.execute("INSERT INTO documents VALUES('d','notes.md','text/markdown',10,2,'2026-01-01','{}')")
+    for position, content in enumerate(["دستگاه را در ارتفاع یک و نیم متری نصب کنید",
+                                        "فاصله از دیوار نباید کمتر از بیست سانتی‌متر باشد"]):
+        fresh_db.execute(
+            "INSERT INTO chunks(id,document_id,position,page,section,section_path,content,vector,tokens,metadata) "
+            "VALUES(?,'d',?,NULL,NULL,'',?,?,?,'{}')",
+            (f"c{position}", position, content, fresh_db.encode_vector(embed(content)),
+             json_module.dumps(tokenize(content))),
+        )
+    chunk_index.invalidate()
+
+    unrelated = retrieve("قیمت فروش این دستگاه چقدر است؟", 50, 2, fusion="linear")
+    assert unrelated.chunks, "the question must still reach candidates"
+    top = unrelated.chunks[0]["features"]
+    assert top["bm25"] == 1.0, "the relative score still reads 1.0 for the best of a weak field"
+    # ... and the gate must not be fooled by that.
+    assert select_grounded(unrelated)[0] is False

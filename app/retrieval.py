@@ -27,6 +27,12 @@ EARLY_EXIT_MARGIN = .04
 # roughly doubles citation precision over citing every returned chunk while
 # keeping 98 percent of the relevant ones (eval/BASELINE.md).
 CITATION_STANDOUT_GAP = 1.5
+# Share of the question's terms the best chunk must contain for its match to
+# count as substantive. Swept against 38 reviewed unanswerable questions
+# (eval/BASELINE.md): higher values buy abstention accuracy at a rate of
+# roughly one correct answer lost per unanswerable question caught, which is
+# the wrong trade for an assistant that cites its sources.
+LEXICAL_FLOOR = .20
 
 PERSIAN_STOP = {"از", "به", "در", "با", "برای", "که", "این", "آن", "را", "و", "یا", "چه", "چرا", "چگونه", "است", "شد", "می"}
 ENGLISH_STOP = {"the", "a", "an", "of", "to", "in", "for", "is", "was", "and", "or", "what", "why", "how", "does"}
@@ -75,6 +81,22 @@ def query_variants(query: str) -> list[str]:
         variants.append(" ".join(translated))
         variants.append(query.strip() + " | " + " ".join(translated))
     return list(dict.fromkeys(variant for variant in variants if variant))
+
+
+# Persian punctuation lives inside the Arabic block, so TOKEN_RE's
+# \u0600-\u06FF range swallows it and "است؟" comes out as a single token that
+# never matches the stopword list. Stripped where a token is compared against a
+# question's words; deliberately NOT stripped inside `tokenize`, which feeds the
+# BM25 postings and the hashed vectors. Doing it there is the correct fix and
+# costs 2 points of hit@5 today, because two cross-language cases that share no
+# term at all with their target document are currently ranked right by luck and
+# the luck moves. Worth revisiting once the default embedding is semantic; see
+# eval/BASELINE.md.
+TOKEN_EDGES = "،؛؟۔٪٫٬"
+
+
+def strip_edges(token: str) -> str:
+    return token.strip(TOKEN_EDGES)
 
 
 def tokenize(text: str) -> list[str]:
@@ -215,6 +237,21 @@ DOCUMENT_WORDS = frozenset({
     "topic", "subject", "about", "summary", "overview", "book", "text", "document",
     "title", "content", "passage",
 })
+
+
+def _query_coverage(query_tokens: list[str], content: str) -> float:
+    """Share of the question's distinct terms that appear in this text.
+
+    Unlike the fused signals this does not depend on what the other candidates
+    scored, which is what an evidence gate needs: whether to answer at all
+    cannot be decided on a scale set by the best of a bad field.
+    """
+    terms = {stripped for token in query_tokens if len(stripped := strip_edges(token)) > 1}
+    terms -= PERSIAN_STOP | ENGLISH_STOP
+    if not terms:
+        return 0.0
+    lowered = content.lower()
+    return sum(1 for term in terms if term in lowered) / len(terms)
 
 
 def _section_signal(keywords: list[str], section_path: str) -> float:
@@ -482,8 +519,13 @@ def select_grounded(result: RetrievalResult) -> tuple[bool, list[dict[str, Any]]
     semantic_intent = result.analysis.intent in {"conceptual", "causal", "document_browse"}
     dense_floor = .24 if semantic_intent else .30
     confidence_floor = .08 if semantic_intent else .24
+    # The lexical test has to be an absolute one. `bm25` here is the candidate's
+    # score divided by the best candidate's, so the top chunk reads 1.0 whenever
+    # any candidate matched a query term at all - measured at 81% of golden
+    # queries - and comparing that to a floor of .08 asked "did retrieval return
+    # anything". This asks how much of the question the chunk actually contains.
     substantive_match = bool(top_features) and (
-        top_features.get("bm25", 0) >= .08
+        _query_coverage(result.analysis.query_tokens, result.chunks[0]["content"]) >= LEXICAL_FLOOR
         or top_features.get("entity", 0) >= .50
         or top_features.get("dense", 0) >= dense_floor
         or (result.analysis.intent == "numeric_fact" and top_features.get("numeric", 0) >= .80)
