@@ -148,27 +148,39 @@ def analyze_query(query: str) -> QueryAnalysis:
     browse_words = ("from the book", "book passage", "from the text", "quote from", "متن کتاب",
                     "از متن", "از کتاب", "بخشی از", "برام بنویس", "برایم بنویس")
 
+    # `structure` is funded out of `metadata`, not out of `dense`. It reads the
+    # same headings `metadata` did, without the file name and type diluting
+    # them, so that is the weight it is entitled to. Paying for it from the
+    # semantic signal instead cost conceptual queries 14 points of hit@5
+    # (eval/BASELINE.md), which is the opposite of the point.
     if any(w in q for w in browse_words):
         intent = "document_browse"
-        weights = {"dense": .52, "bm25": .08, "keyword": .18, "entity": .03, "numeric": .02, "temporal": .02, "metadata": .15}
+        weights = {"dense": .52, "bm25": .08, "keyword": .18, "entity": .03, "numeric": .02, "temporal": .02,
+                   "metadata": .07, "structure": .08}
     elif temporal or any(w in q for w in temporal_words):
         intent = "temporal_fact"
-        weights = {"dense": .16, "bm25": .10, "keyword": .10, "entity": .22, "numeric": .07, "temporal": .28, "metadata": .07}
+        weights = {"dense": .16, "bm25": .10, "keyword": .10, "entity": .22, "numeric": .07, "temporal": .28,
+                   "metadata": .04, "structure": .03}
     elif numbers or any(w in q for w in numeric_words):
         intent = "numeric_fact"
-        weights = {"dense": .15, "bm25": .11, "keyword": .10, "entity": .22, "numeric": .28, "temporal": .06, "metadata": .08}
+        weights = {"dense": .15, "bm25": .11, "keyword": .10, "entity": .22, "numeric": .28, "temporal": .06,
+                   "metadata": .05, "structure": .03}
     elif any(w in q for w in causal_words):
         intent = "causal"
-        weights = {"dense": .41, "bm25": .15, "keyword": .12, "entity": .15, "numeric": .03, "temporal": .05, "metadata": .09}
+        weights = {"dense": .41, "bm25": .15, "keyword": .12, "entity": .15, "numeric": .03, "temporal": .05,
+                   "metadata": .04, "structure": .05}
     elif any(w in q for w in code_words):
         intent = "technical_code"
-        weights = {"dense": .27, "bm25": .27, "keyword": .11, "entity": .21, "numeric": .05, "temporal": .02, "metadata": .07}
+        weights = {"dense": .27, "bm25": .27, "keyword": .11, "entity": .21, "numeric": .05, "temporal": .02,
+                   "metadata": .03, "structure": .04}
     elif any(w in q for w in conceptual_words):
         intent = "conceptual"
-        weights = {"dense": .52, "bm25": .13, "keyword": .12, "entity": .07, "numeric": .02, "temporal": .02, "metadata": .12}
+        weights = {"dense": .52, "bm25": .13, "keyword": .12, "entity": .07, "numeric": .02, "temporal": .02,
+                   "metadata": .05, "structure": .07}
     else:
         intent = "exact_fact"
-        weights = {"dense": .25, "bm25": .19, "keyword": .11, "entity": .23, "numeric": .07, "temporal": .06, "metadata": .09}
+        weights = {"dense": .25, "bm25": .19, "keyword": .11, "entity": .23, "numeric": .07, "temporal": .06,
+                   "metadata": .04, "structure": .05}
     return QueryAnalysis(intent=intent, language=language, weights=weights, entities=entities, numbers=numbers,
                          temporal_terms=temporal, keywords=keywords, query_tokens=query_tokens)
 
@@ -190,6 +202,39 @@ def _temporal_signal(terms: list[str], content: str, temporal_intent: bool) -> f
     if terms:
         return _overlap(terms, content)
     return 1.0 if temporal_intent and DATE_RE.search(content) else 0.0
+
+
+# Words that name a document rather than its subject. "موضوع این کتاب چیه؟"
+# asks what a book is about; a contract clause headed "ماده ۲ — موضوع قرارداد"
+# matches the word and means something else entirely. Measured on the golden
+# set, letting these terms score cost conceptual queries 14 points of hit@5 by
+# ranking two contracts above the book the question was about. They stay in
+# every other signal, where a body full of them is genuine evidence.
+DOCUMENT_WORDS = frozenset({
+    "موضوع", "خلاصه", "درباره", "مفهوم", "توضیح", "کتاب", "متن", "سند", "مطلب", "محتوا",
+    "topic", "subject", "about", "summary", "overview", "book", "text", "document",
+    "title", "content", "passage",
+})
+
+
+def _section_signal(keywords: list[str], section_path: str) -> float:
+    """How much of the question the section headings above a chunk account for.
+
+    A heading is a few deliberate words, so a match here says more than the
+    same match against a paragraph - which is also why a coincidental match
+    does more damage. Scored as the share of the query's distinct content terms
+    present in the path, capped like the keyword signal so a long question is
+    not required to match every one of its words.
+    """
+    if not keywords or not section_path:
+        return 0.0
+    lowered = section_path.lower()
+    distinct = {keyword.lower() for keyword in keywords if len(keyword) > 1}
+    distinct -= DOCUMENT_WORDS
+    if not distinct:
+        return 0.0
+    matches = sum(1 for keyword in distinct if keyword in lowered)
+    return min(1.0, matches / min(3, len(distinct)))
 
 
 def _multi_keyword_signal(keywords: list[str], content: str) -> float:
@@ -366,7 +411,11 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     for position in candidates:
         row = snapshot.rows[position]
         content = row["content"]
-        metadata_text = f'{row.get("document_name", "")} {row.get("section") or ""} {row.get("document_type", "")}'
+        # `metadata` mixes the file name and type in with the heading, which
+        # dilutes exactly the term that locates an answer inside a document.
+        # `structure` reads the section path on its own.
+        section_path = row.get("section_path") or row.get("section") or ""
+        metadata_text = f'{row.get("document_name", "")} {section_path} {row.get("document_type", "")}'
         features = {
             "dense": float(dense[position]),
             "bm25": float(lexical[position] / bm_max),
@@ -375,6 +424,7 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
             "numeric": _numeric_signal(analysis.numbers, content, analysis.intent == "numeric_fact"),
             "temporal": _temporal_signal(analysis.temporal_terms, content, analysis.intent == "temporal_fact"),
             "metadata": _overlap(qtokens[:6], metadata_text),
+            "structure": _section_signal(analysis.keywords, section_path),
         }
         for name, value in features.items():
             signals[name].append(value)

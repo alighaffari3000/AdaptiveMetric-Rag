@@ -322,7 +322,8 @@ async def chat(request: ChatRequest):
         grounded_chunks = []
     citations = [Citation(
         id=i, document_id=chunk["document_id"], document_name=chunk["document_name"], chunk_id=chunk["id"],
-        page=chunk.get("page"), section=chunk.get("section"), excerpt=chunk["content"][:420],
+        page=chunk.get("page"), section=chunk.get("section"),
+        section_path=chunk.get("section_path") or "", excerpt=chunk["content"][:420],
         highlight=best_evidence(request.message, chunk["content"], claim_for_citation(answer, i)), score=chunk["score"],
     ) for i, chunk in enumerate(grounded_chunks, 1)]
     conversation_id = request.conversation_id or uuid.uuid4().hex

@@ -71,6 +71,7 @@ class Citation(BaseModel):
     chunk_id: str
     page: int | None = None
     section: str | None = None
+    section_path: str = ""
     excerpt: str
     highlight: str = ""
     score: float

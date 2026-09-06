@@ -205,3 +205,36 @@ def test_cross_encoder_ties_become_neutral_scores(monkeypatch):
     monkeypatch.setattr(rerank, "_score_cross_encoder", lambda model, query, passages: [1.0, 1.0])
     settings = AppSettings(rerank_backend="cross-encoder", rerank_model="fake")
     assert asyncio.run(rerank_scores(settings, "q", [{"content": "a"}, {"content": "b"}])) == [0.5, 0.5]
+
+
+def test_a_structure_signal_that_separates_nothing_does_not_spend_its_weight():
+    """Most libraries are unstructured; the signal must cost them nothing.
+
+    Rank fusion already skips a signal that carries no ordering. This pins the
+    behaviour to the structure signal specifically, because it is the one that
+    is identically zero across a whole flat corpus.
+    """
+    import numpy as np
+
+    from app.retrieval import _weighted_rrf
+
+    weights = {"dense": .5, "bm25": .3, "structure": .2}
+    varying = {"dense": np.array([0.9, 0.4, 0.1]), "bm25": np.array([0.2, 0.8, 0.3])}
+    flat_structure = dict(varying, structure=np.zeros(3))
+
+    without = _weighted_rrf(varying, weights)
+    with_flat = _weighted_rrf(flat_structure, weights)
+    assert np.allclose(without, with_flat)
+
+
+def test_a_structure_signal_that_does_separate_changes_the_order():
+    import numpy as np
+
+    from app.retrieval import _weighted_rrf
+
+    weights = {"dense": .5, "structure": .5}
+    tied_dense = np.array([0.5, 0.5])
+    first_wins = _weighted_rrf({"dense": tied_dense, "structure": np.array([1.0, 0.0])}, weights)
+    second_wins = _weighted_rrf({"dense": tied_dense, "structure": np.array([0.0, 1.0])}, weights)
+    assert first_wins[0] > first_wins[1]
+    assert second_wins[1] > second_wins[0]
