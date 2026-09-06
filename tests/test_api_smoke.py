@@ -134,3 +134,17 @@ def test_citation_highlight_migration_runs_only_once(client):
 def test_unsupported_upload_is_rejected(client):
     response = client.post("/api/documents", files={"file": ("notes.xyz", b"data", "text/plain")})
     assert response.status_code == 415
+
+
+def test_router_settings_round_trip_through_the_api(client):
+    """The router is configurable from the settings panel, and off by default."""
+    current = client.get("/api/settings").json()
+    assert current["toc_router_enabled"] is False
+
+    current.update(toc_router_enabled=True, toc_router_max_sections=2, toc_router_min_chunks=12)
+    saved = client.put("/api/settings", json=current).json()
+    assert saved["toc_router_enabled"] is True
+    assert saved["toc_router_max_sections"] == 2
+    assert saved["toc_router_min_chunks"] == 12
+
+    assert client.get("/api/settings").json()["toc_router_enabled"] is True

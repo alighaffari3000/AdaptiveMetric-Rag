@@ -25,7 +25,7 @@ async function loadSettings(){
   state.settings=await api('/api/settings'); const s=state.settings;
   Object.entries(s).forEach(([k,v])=>{ const el=$(`[name="${k}"]`); if(!el||k==='api_key'||k==='embedding_api_key')return; if(el.type==='checkbox')el.checked=v; else el.value=v; });
   $('#keyStatus').textContent=s.has_api_key?'یک کلید API امن ذخیره شده است.':'کلیدی ذخیره نشده است.';
-  $('#confidenceOutput').textContent=s.confidence_threshold; updateProviderUI(false);updateEmbeddingUI(false);updateRerankUI();
+  $('#confidenceOutput').textContent=s.confidence_threshold; updateProviderUI(false);updateEmbeddingUI(false);updateRerankUI();updateTocRouterUI();
   const labels={local:'Local · Extractive',ollama:`Ollama · ${s.model}`,openai:`OpenAI · ${s.model}`,gemini:`Gemini · ${s.model}`}; $('#providerPill').textContent=labels[s.provider];
 }
 const providerDefaults={local:{model:'local-extractive',url:''},ollama:{model:'llama3.2',url:'http://host.docker.internal:11434'},openai:{model:'gpt-5-mini',url:'https://api.openai.com/v1'},gemini:{model:'gemini-2.5-flash',url:'https://generativelanguage.googleapis.com/v1beta'}};
@@ -37,6 +37,8 @@ function updateEmbeddingUI(reset=false){const provider=$('#embeddingProvider').v
 $('#embeddingProvider').onchange=()=>updateEmbeddingUI(true);
 function updateRerankUI(){$('#rerankOptions').style.display=$('#rerankEnabled').checked?'contents':'none';}
 $('#rerankEnabled').onchange=updateRerankUI;
+function updateTocRouterUI(){$('#tocRouterOptions').style.display=$('#tocRouterEnabled').checked?'contents':'none';}
+$('#tocRouterEnabled').onchange=updateTocRouterUI;
 $('#loadEmbeddingModels').onclick=async()=>{const button=$('#loadEmbeddingModels');button.disabled=true;button.textContent='در حال دریافت…';try{const url=$('#embeddingBaseUrl').value;const result=await api(`/api/embeddings/ollama-models?base_url=${encodeURIComponent(url)}`);const list=$('#ollamaEmbeddingModels');list.innerHTML=result.models.map(model=>`<option value="${escapeHTML(model)}"></option>`).join('');if(result.models.length){$('#embeddingModel').value=result.models[0];toast(`${faNumber.format(result.models.length)} مدل Ollama پیدا شد`)}else toast('مدلی در Ollama پیدا نشد',true)}catch(e){toast(e.message,true)}finally{button.disabled=false;button.textContent='دریافت مدل‌ها'}};
 function openSettings(){ $('#settingsModal').classList.add('open'); loadSettings().catch(e=>toast(e.message,true)); }
 $('#openSettings').onclick=$('#headerSettings').onclick=openSettings; $$('.close-settings').forEach(b=>b.onclick=()=>$('#settingsModal').classList.remove('open'));

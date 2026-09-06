@@ -35,6 +35,11 @@ class AppSettings(BaseModel):
     rerank_model: str = ""
     rerank_top_n: int = Field(30, ge=5, le=100)
     rerank_weight: float = Field(0.7, ge=0, le=1)
+    # Off by default: one extra model call per query, worth it only for a long
+    # structured document where first-stage retrieval has real competition.
+    toc_router_enabled: bool = False
+    toc_router_max_sections: int = Field(3, ge=1, le=10)
+    toc_router_min_chunks: int = Field(40, ge=1, le=100000)
 
     @field_validator("chunk_overlap")
     @classmethod
@@ -55,6 +60,9 @@ class SettingsView(AppSettings):
     rerank_model: str = ""
     rerank_top_n: int = Field(30, ge=5, le=100)
     rerank_weight: float = Field(0.7, ge=0, le=1)
+    toc_router_enabled: bool = False
+    toc_router_max_sections: int = Field(3, ge=1, le=10)
+    toc_router_min_chunks: int = Field(40, ge=1, le=100000)
     has_embedding_api_key: bool = False
 
 

@@ -389,6 +389,24 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     else:
         subset = None
 
+    # The corpus the user is searching, before any narrowing a router applied.
+    # Confidence is measured against this rather than against the slice a
+    # router guessed at, or narrowing to one section would make every answer
+    # look unremarkable and the evidence gate would refuse it.
+    scope = subset
+    # A caller that has already decided which rows are worth searching - the
+    # table-of-contents router is the one that does - narrows the corpus here.
+    # An empty narrowing is treated as no narrowing, so the router can never
+    # remove the only chunk that holds the answer.
+    positions = (filters or {}).get("positions")
+    if positions:
+        chosen = np.asarray(sorted(set(positions)), dtype=np.int64)
+        chosen = chosen[(chosen >= 0) & (chosen < snapshot.size)]
+        if chosen.size:
+            subset = chosen if subset is None else np.intersect1d(subset, chosen)
+            if not subset.size:
+                return RetrievalResult([], analysis, 0.0, False)
+
     qvec = np.asarray(query_vector if query_vector is not None else embed(query), dtype=np.float32)
     qtokens = analysis.keywords
 
@@ -437,7 +455,7 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
              else _weighted_sum(arrays, analysis.weights))
     # How far each chunk stands above the corpus, in standard deviations of the
     # raw similarity; the best chunk's value is the result-level `standout`.
-    pool = dense[universe]
+    pool = dense[scope] if scope is not None else dense
     pool_mean, pool_std = (float(pool.mean()), float(pool.std()) + 1e-9) if pool.size > 1 else (0.0, 1.0)
     standout = float((pool.max() - pool_mean) / pool_std) if pool.size > 1 else 0.0
     for chunk, value in zip(scored, fused):
