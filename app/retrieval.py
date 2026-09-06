@@ -365,9 +365,10 @@ def score_confidence(selected: list[dict[str, Any]], query_tokens: list[str],
     """
     if not selected:
         return 0.0
-    terms = set(query_tokens)
-    haystack = " ".join(chunk["content"].lower() for chunk in selected)
-    coverage = min(1.0, sum(1 for term in terms if term in haystack) / max(len(terms), 1))
+    haystack = " ".join(chunk["content"] for chunk in selected)
+    # Same term set the evidence gate uses, so a question mark fused onto a
+    # stopword cannot quietly lower the confidence of a chunk that answers.
+    coverage = _query_coverage(query_tokens, haystack)
     reranked = selected[0].get("rerank_score")
     relevance = float(reranked) if reranked is not None else min(1.0, standout / STANDOUT_REFERENCE)
     return max(0.0, min(1.0, .55 * relevance + .45 * coverage))

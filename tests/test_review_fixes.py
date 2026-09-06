@@ -220,14 +220,18 @@ def test_a_stopword_carrying_a_question_mark_does_not_count_as_a_term():
     assert _query_coverage(["مبلغ", "چیست؟"], "مبلغ قرارداد دو میلیارد ریال") == pytest.approx(0.5)
 
 
-def test_the_gate_refuses_a_top_chunk_that_shares_almost_nothing_with_the_query(fresh_db):
-    """A relative bm25 read 1.0 for the top chunk of 81% of golden queries."""
+def test_the_gate_follows_term_coverage_rather_than_the_relative_bm25(fresh_db):
+    """A relative bm25 read 1.0 for the top chunk of 81% of golden queries.
+
+    Both questions below produce that same 1.0, so under the old condition both
+    were answered. Only one of them shares any wording with the library.
+    """
     import json as json_module
 
     from app.index import index as chunk_index
     from app.retrieval import embed, retrieve, select_grounded, tokenize
 
-    fresh_db.execute("INSERT INTO documents VALUES('d','notes.md','text/markdown',10,2,'2026-01-01','{}')")
+    fresh_db.execute("INSERT INTO documents VALUES('d','manual.md','text/markdown',10,2,'2026-01-01','{}')")
     for position, content in enumerate(["دستگاه را در ارتفاع یک و نیم متری نصب کنید",
                                         "فاصله از دیوار نباید کمتر از بیست سانتی‌متر باشد"]):
         fresh_db.execute(
@@ -238,9 +242,15 @@ def test_the_gate_refuses_a_top_chunk_that_shares_almost_nothing_with_the_query(
         )
     chunk_index.invalidate()
 
-    unrelated = retrieve("قیمت فروش این دستگاه چقدر است؟", 50, 2, fusion="linear")
-    assert unrelated.chunks, "the question must still reach candidates"
-    top = unrelated.chunks[0]["features"]
-    assert top["bm25"] == 1.0, "the relative score still reads 1.0 for the best of a weak field"
-    # ... and the gate must not be fooled by that.
+    # Both mention the device, so both give the top chunk a maximal bm25. Only
+    # the first is mostly about something the library covers.
+    related = retrieve("دستگاه را در چه ارتفاعی نصب کنیم؟", 50, 2, fusion="linear")
+    unrelated = retrieve("قیمت خرید و هزینه نگهداری سالانه گارانتی این دستگاه چقدر است؟",
+                         50, 2, fusion="linear")
+    for result in (related, unrelated):
+        assert result.chunks, "both questions must still reach candidates"
+        assert result.chunks[0]["features"]["bm25"] == 1.0, \
+            "the relative score reads 1.0 for the best of any field, however weak"
+
+    assert select_grounded(related)[0] is True
     assert select_grounded(unrelated)[0] is False
