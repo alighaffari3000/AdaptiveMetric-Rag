@@ -260,7 +260,7 @@ def document_embedding_text(name: str, section: str | None, content: str) -> str
 
 async def reindex_all(settings: AppSettings) -> dict:
     chunks = database.rows(
-        "SELECT c.id,c.content,c.section,d.name document_name FROM chunks c "
+        "SELECT c.id,c.content,c.section,c.section_path,d.name document_name FROM chunks c "
         "JOIN documents d ON d.id=c.document_id ORDER BY c.document_id,c.position"
     )
     if not chunks:
@@ -268,7 +268,8 @@ async def reindex_all(settings: AppSettings) -> dict:
         return {"chunks": 0, "dimensions": len(probe[0]) if probe else None}
     vectors = await create_embeddings(
         settings,
-        [document_embedding_text(chunk["document_name"], chunk.get("section"), chunk["content"]) for chunk in chunks],
+        [document_embedding_text(chunk["document_name"], chunk.get("section_path") or chunk.get("section"),
+                                 chunk["content"]) for chunk in chunks],
     )
     with database.connect() as db:
         db.executemany(

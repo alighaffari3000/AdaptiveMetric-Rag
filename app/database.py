@@ -19,7 +19,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 (DATA_DIR / "uploads").mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "adaptive_rag.db"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _local = threading.local()
 _write_lock = threading.RLock()
@@ -99,6 +99,7 @@ def _create_schema(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS chunks (
           id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
           position INTEGER NOT NULL, page INTEGER, section TEXT,
+          section_path TEXT NOT NULL DEFAULT '',
           content TEXT NOT NULL, vector BLOB NOT NULL, tokens TEXT NOT NULL,
           metadata TEXT NOT NULL DEFAULT '{}'
         );
@@ -163,12 +164,29 @@ def _migrate_embeddings_to_blob(db: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_add_section_path(db: sqlite3.Connection) -> None:
+    """Schema v2: chunks gain the section path they sit under.
+
+    Existing rows keep an empty path rather than a guessed one. They score zero
+    on the structure signal, which is correct: the document was chunked before
+    structure was extracted, and re-ingesting it is the only honest way to fill
+    the column in.
+    """
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(chunks)")}
+    if "section_path" in columns:
+        return
+    db.execute("ALTER TABLE chunks ADD COLUMN section_path TEXT NOT NULL DEFAULT ''")
+    logger.info("added chunks.section_path; existing chunks carry an empty path until re-indexed")
+
+
 def init_db() -> None:
     with connect() as db:
         _create_schema(db)
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version < 1:
             _migrate_embeddings_to_blob(db)
+        if version < 2:
+            _migrate_add_section_path(db)
         if version < SCHEMA_VERSION:
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 

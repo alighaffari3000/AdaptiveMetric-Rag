@@ -72,6 +72,25 @@ async def main_async(args: argparse.Namespace) -> int:
         settings = settings.model_copy(update={"provider": args.provider,
                                                "model": args.model or settings.model,
                                                "api_key": key})
+    if args.chunk_size or args.chunk_overlap is not None:
+        size = args.chunk_size or settings.chunk_size
+        overlap = settings.chunk_overlap if args.chunk_overlap is None else args.chunk_overlap
+        settings = settings.model_copy(update={"chunk_size": size,
+                                               "chunk_overlap": min(overlap, size - 1)})
+    if args.flat_chunking:
+        import app.documents as documents_module
+
+        structural = documents_module.extract
+
+        def flat(filename, payload):
+            # One block per page, structure discarded: what the chunker did
+            # before section paths existed.
+            merged: dict[int | None, list[str]] = {}
+            for text, page, _ in structural(filename, payload):
+                merged.setdefault(page, []).append(text)
+            return [("\n".join(parts), page, None) for page, parts in merged.items()]
+
+        documents_module.extract = flat
     if args.rerank:
         settings = settings.model_copy(update={
             "rerank_enabled": True,
@@ -177,6 +196,11 @@ def main() -> int:
     parser.add_argument("--tag", help="only run cases carrying this tag")
     parser.add_argument("--context", type=int, default=10, help="ranked chunks to score (default 10)")
     parser.add_argument("--verbose", action="store_true", help="list failing cases")
+    parser.add_argument("--chunk-size", type=int,
+                        help="override the chunk size, to separate granularity effects from ranking ones")
+    parser.add_argument("--chunk-overlap", type=int, help="override the chunk overlap")
+    parser.add_argument("--flat-chunking", action="store_true",
+                        help="ignore document structure when chunking, for A/B comparison")
     parser.add_argument("--embedding", help="override the embedding provider for this run")
     parser.add_argument("--embedding-model", help="override the embedding model for this run")
     parser.add_argument("--embedding-base-url", help="override the embedding base URL for this run")

@@ -215,3 +215,85 @@ def test_failed_unit_of_work_rolls_back(fresh_db):
             db.execute("INSERT INTO meta(key,value) VALUES('rolled','back')")
             raise RuntimeError("boom")
     assert fresh_db.meta_get("rolled") == ""
+
+
+def test_migration_adds_section_path_to_a_pre_existing_database(tmp_path, monkeypatch):
+    """A v1 database must gain the column without losing or inventing rows."""
+    import sqlite3
+
+    from app import database
+
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        """
+        CREATE TABLE documents (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL,
+          size INTEGER NOT NULL, chunks INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE chunks (
+          id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL, page INTEGER, section TEXT,
+          content TEXT NOT NULL, vector BLOB NOT NULL, tokens TEXT NOT NULL,
+          metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        PRAGMA user_version=1;
+        """
+    )
+    legacy.execute("INSERT INTO documents VALUES('d','old.txt','text/plain',10,1,'2026-01-01','{}')")
+    legacy.execute(
+        "INSERT INTO chunks(id,document_id,position,page,section,content,vector,tokens,metadata) "
+        "VALUES('c','d',0,NULL,'Intro','kept text',?,'[\"kept\"]','{}')",
+        (database.encode_vector([0.1, 0.2]),),
+    )
+    legacy.commit()
+    legacy.close()
+
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_thread_connection()
+    try:
+        database.init_db()
+        columns = {row["name"] for row in database.rows("PRAGMA table_info(chunks)")}
+        assert "section_path" in columns
+        rows = database.rows("SELECT id,content,section,section_path FROM chunks")
+        assert len(rows) == 1
+        assert rows[0]["content"] == "kept text"
+        assert rows[0]["section"] == "Intro"
+        # Nothing is guessed for a chunk that predates structure extraction.
+        assert rows[0]["section_path"] == ""
+        assert database.rows("PRAGMA user_version")[0]["user_version"] == database.SCHEMA_VERSION
+    finally:
+        database.close_thread_connection()
+
+
+def test_migration_is_idempotent(tmp_path, monkeypatch):
+    from app import database
+
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "twice.db")
+    database.close_thread_connection()
+    try:
+        database.init_db()
+        database.init_db()
+        columns = [row["name"] for row in database.rows("PRAGMA table_info(chunks)")]
+        assert columns.count("section_path") == 1
+    finally:
+        database.close_thread_connection()
+
+
+def test_snapshot_rows_expose_the_section_path(fresh_db):
+    import json as json_module
+
+    from app.index import index as chunk_index
+
+    fresh_db.execute(
+        "INSERT INTO documents VALUES('d','guide.md','text/markdown',10,1,'2026-01-01','{}')"
+    )
+    fresh_db.execute(
+        "INSERT INTO chunks(id,document_id,position,page,section,section_path,content,vector,tokens,metadata) "
+        "VALUES('c','d',0,NULL,'Sick','Guide > Leave > Sick','up to eight days',?,?,'{}')",
+        (fresh_db.encode_vector([1.0, 0.0]), json_module.dumps(["eight", "days"])),
+    )
+    chunk_index.invalidate()
+    row = chunk_index.snapshot().rows[0]
+    assert row["section_path"] == "Guide > Leave > Sick"

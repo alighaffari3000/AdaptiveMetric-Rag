@@ -32,7 +32,7 @@ B = .75
 SATURATION = 1.5  # the `tf + 1.5 * (...)` denominator term of the original formula
 
 CHUNK_QUERY = (
-    "SELECT c.id,c.document_id,c.position,c.page,c.section,c.content,c.vector,c.tokens,c.metadata,"
+    "SELECT c.id,c.document_id,c.position,c.page,c.section,c.section_path,c.content,c.vector,c.tokens,c.metadata,"
     "d.name document_name,d.type document_type "
     "FROM chunks c JOIN documents d ON d.id=c.document_id "
     "ORDER BY c.rowid"
