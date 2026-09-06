@@ -9,7 +9,7 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 ## قابلیت‌ها
 
 - Query Analyzer برای intentهای factual، conceptual، causal، numeric، temporal و technical/code
-- ترکیب پویا از Dense، BM25، Entity، Number، Time و Metadata
+- ترکیب پویا از Dense، BM25، Entity، Number، Time، Metadata و Structure (ساختار سند)
 - جستجوی چندکلیدواژه‌ای فارسی/انگلیسی و ترکیب چند بردار Query برای retrieval بین‌زبانی
 - مسیر سه‌مرحله‌ای candidate retrieval، adaptive scoring و grounded generation
 - confidence score و سیگنال early exit
@@ -28,7 +28,9 @@ AdaptiveMetric RAG یک دستیار دانش self-hosted و چندزبانه ا
 ```text
 Query → Query Analyzer → Metric Router
                             │
-          Dense + BM25 + Entity + Number + Time + Metadata
+           ToC section router (optional, off by default)
+                            │
+      Dense + BM25 + Entity + Number + Time + Metadata + Structure
                             │
                        Top candidates
                             │

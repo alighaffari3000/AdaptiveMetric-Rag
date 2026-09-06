@@ -9,9 +9,15 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 ## What is included
 
 - Adaptive query analyzer with factual, conceptual, causal, numeric, temporal, and technical/code intents
-- Per-query mixture of dense, BM25, entity, numeric, temporal, and metadata signals,
-  fused by rank so no signal wins on the scale it happens to use
+- Per-query mixture of dense, BM25, entity, numeric, temporal, metadata, and
+  document-structure signals, fused by rank so no signal wins on the scale it
+  happens to use
 - Optional second-stage reranking by a local cross-encoder or by the answer model
+- Structure-aware ingestion: headings from Markdown, HTML, Word styles and a PDF's
+  own outline become chunk boundaries, so a chunk is a whole number of the
+  document's sections and every citation says which one it came from
+- Optional table-of-contents router that asks the model which sections a question
+  belongs to before searching, constrained to headings that actually exist
 - Multilingual multi-keyword expansion with blended query vectors for cross-language retrieval
 - Three-stage flow: fast candidate selection → adaptive scoring → grounded generation
 - Confidence scoring and early-exit signals
@@ -32,7 +38,9 @@ AdaptiveMetric RAG is a self-hosted, multilingual knowledge assistant that chang
 ```text
 Query → Query Analyzer → Metric Router
                             │
-          Dense + BM25 + Entity + Number + Time + Metadata
+           ToC section router (optional, off by default)
+                            │
+      Dense + BM25 + Entity + Number + Time + Metadata + Structure
                             │
                     Candidate pool (10–500)
                             │
@@ -52,6 +60,23 @@ Query → Query Analyzer → Metric Router
 Retrieval is served from an in-memory index built once at startup and refreshed on
 ingest, delete, and re-index: a float32 matrix for dense scoring and an inverted token
 index for BM25. Retrieval over 20,000 chunks takes about 13 ms.
+
+### Structure-aware chunking
+
+Cutting every `chunk_size` characters throws away the headings a document
+already provides, and a heading often names exactly what its text does not
+repeat: a clause headed "مرخصی استعلاجی" may only say "حداکثر هشت روز در سال".
+Ingestion extracts headings and makes section boundaries chunk boundaries, so a
+chunk is a whole number of sections and declares every one it covers. Short
+sibling sections are packed together up to `chunk_size`, which keeps chunk sizes
+where they were.
+
+The idea comes from [STAIR](https://arxiv.org/abs/2609.03874), which shows that
+giving a retriever the corpus structure explicitly beats making it infer the
+structure from the text. Its fine-tuned generative retriever is not adopted:
+this index is rebuilt on every ingest and the deployment target is CPU-only.
+`docs/STAIR_PLAN.fa.md` records what was taken and what was not, and
+`eval/BASELINE.md` has the measurements.
 
 ### Choosing an embedding
 
