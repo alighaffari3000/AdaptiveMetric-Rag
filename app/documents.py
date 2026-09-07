@@ -160,13 +160,23 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
                     end = boundary + 1
             piece = body[start:end].strip()
             if piece:
-                # Only the window holding the opening headings declares them;
-                # the rest are continuations of this section alone.
-                opens = start < len(opening)
-                here = covered if opens else ([section] if section else [])
+                # A window declares what it actually holds: the opening
+                # headings only if it contains them, the long section only if
+                # it reaches past them. A window made entirely of carried text
+                # must not claim the section none of its words come from.
+                holds_opening = start < len(opening)
+                holds_body = end > len(opening)
+                here = ([s for s in covered if s != section] if holds_opening else [])
+                if holds_body and section:
+                    here = here + [section]
+                here = list(dict.fromkeys(here))
+                # The page of whichever part supplies most of this window, so a
+                # window that is nearly all body text is not cited by the page
+                # its heading happened to sit on.
+                carried_here = max(0, min(end, len(opening)) - start)
                 chunks.append({
                     "content": piece,
-                    "page": first_page if opens else page,
+                    "page": first_page if carried_here * 2 > (end - start) else page,
                     "section": (here[0].split(structure.PATH_SEPARATOR)[-1] if here else None),
                     "section_path": structure.merge_section_paths(here),
                     "sections": here,
@@ -183,33 +193,41 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
         if not clean:
             continue
         if len(clean) > size:
+            # Every pending heading opens the section that follows, however
+            # many there are. Emitting them separately would produce the
+            # body-less chunk this is here to avoid; `window` labels each
+            # window by what it actually holds.
             carried = split_trailing_headings()
             emit(pending)
             pending.clear()
-            # Headings short enough to open the section do so; anything longer
-            # would leave a window that declares a section none of its text is
-            # from, so it stands as its own chunk instead.
-            if sum(len(part) + 1 for part, _, _ in carried) > size // 2:
-                emit(carried)
-                carried = []
             window(clean, page, section, carried)
             continue
         if pending_length() + len(clean) > size:
             carried = split_trailing_headings()
-            emit(pending)
+            if not pending:
+                # Nothing but headings, and they have already outgrown `size`.
+                # There is no body to attach them to, so respect the bound.
+                emit(carried)
+                carried = []
+            else:
+                emit(pending)
             pending.clear()
             pending.extend(carried)
         pending.append((clean, page, section))
 
     if pending:
-        if chunks and all(structure.heading_only(text, section) for text, _, section in pending):
+        trailing = "\n".join(text for text, _, _ in pending)
+        fits = bool(chunks) and len(chunks[-1]["content"]) + 1 + len(trailing) <= size
+        if fits and all(structure.heading_only(text, section) for text, _, section in pending):
             # Nothing follows these headings, so they join what came before
             # rather than becoming a chunk with no text in it.
             last = chunks[-1]
-            last["content"] = last["content"] + "\n" + "\n".join(text for text, _, _ in pending)
+            last["content"] = f'{last["content"]}\n{trailing}'
             merged = list(dict.fromkeys(last["sections"] + [s for _, _, s in pending if s]))
             last["sections"] = merged
             last["section_path"] = structure.merge_section_paths(merged)
+            # Same rule `emit` uses, so the two paths cannot drift apart.
+            last["section"] = merged[0].split(structure.PATH_SEPARATOR)[-1] if merged else None
         else:
             emit(pending)
     return chunks

@@ -522,13 +522,18 @@ def test_carried_text_keeps_its_own_page_and_declares_only_what_it_holds():
     assert all(chunk["sections"] == ["Long"] for chunk in chunks[1:])
 
 
-def test_a_heading_carried_into_a_long_section_keeps_the_heading_s_page():
+def test_a_window_is_cited_by_the_page_supplying_most_of_it():
+    """A heading carried across a page boundary must not drag the citation
+    back with it: the reader is looking at the body, which is on page two."""
     chunks = chunk_blocks([("Chapter one", 1, "Chapter one"),
                            ("word " * 200, 2, "Chapter one > Detail")], 300, 40)
-    assert chunks[0]["page"] == 1
     assert chunks[0]["sections"] == ["Chapter one", "Chapter one > Detail"]
-    assert chunks[1]["page"] == 2
-    assert chunks[1]["sections"] == ["Chapter one > Detail"]
+    assert all(chunk["page"] == 2 for chunk in chunks), "the body is on page two"
+
+    # When the carried text is most of the window, its page is the right one.
+    mostly_carried = chunk_blocks([("X " * 145, 1, "Intro"), ("L " * 400, 2, "Long")], 300, 40)
+    assert mostly_carried[0]["page"] == 1
+    assert mostly_carried[0]["sections"] == ["Intro"]
 
 
 @pytest.mark.parametrize("line", [
@@ -545,3 +550,36 @@ def test_a_punctuated_heading_may_be_as_long_as_it_needs(line):
 def test_the_word_count_still_guards_the_dotted_number_rule():
     assert not detect_plain("3.5 percent of the fleet was replaced during the year\n")
     assert detect_plain("4.2.1 Rollback procedure\n")
+
+
+@pytest.mark.parametrize("line", [
+    "ماده ۵: حقوق و مزایای کارکنان رسمی توسط هیئت مدیره تعیین می شود.",
+    "Section 4. This section describes the rollback and recovery procedure for the fleet.",
+    "Chapter 4 - was written by the finance team in the last quarter of the year",
+])
+def test_a_separator_does_not_turn_a_sentence_into_a_heading(line):
+    """A separator says a title follows, not that whatever follows is one."""
+    assert not detect_plain(line + "\nbody\n"), f"{line!r} is prose"
+
+
+def test_packing_respects_the_size_bound_even_with_no_body_anywhere():
+    """A run of headings has nothing to attach to, so the bound is all there is.
+
+    The end-of-document merge used to append them to the last chunk without
+    checking, pushing it past chunk_size.
+    """
+    blocks = [(f"Heading number {index}", None, f"Heading number {index}") for index in range(29)]
+    chunks = chunk_blocks(blocks, 200, 20)
+    assert len(chunks) > 1
+    assert all(len(chunk["content"]) <= 200 for chunk in chunks)
+
+
+def test_headings_too_long_to_carry_still_open_the_section_they_precede():
+    """Emitting them separately produced the body-less chunk this forbids."""
+    headings = [(f"Chapter {index} — " + "title words here " * 4, None, f"Chapter {index}")
+                for index in range(4)]
+    chunks = chunk_blocks(headings + [("word " * 200, None, "Long")], 300, 40)
+    for chunk in chunks:
+        assert chunk["sections"], "no chunk may be filed under nothing"
+    holder = next(c for c in chunks if "word word" in c["content"])
+    assert "Long" in holder["sections"]
