@@ -583,3 +583,62 @@ def test_headings_too_long_to_carry_still_open_the_section_they_precede():
         assert chunk["sections"], "no chunk may be filed under nothing"
     holder = next(c for c in chunks if "word word" in c["content"])
     assert "Long" in holder["sections"]
+
+
+def test_a_heading_is_never_stranded_whatever_the_sizes():
+    """The body not fitting beside its heading used to strand the heading.
+
+    Grouping a heading with the text it opens before packing makes that
+    impossible by construction rather than by another special case.
+    """
+    chunks = chunk_blocks([("Chapter One", None, "Chapter One"),
+                           ("x " * 447, None, "Chapter One")], 900, 140)
+    assert "Chapter One" in chunks[0]["content"]
+    assert chunks[0]["content"].strip() != "Chapter One"
+
+
+def test_chunking_holds_its_invariants_over_random_documents():
+    """Six review passes found bounds broken by inputs no fixture had.
+
+    Content is never dropped, `size` is never exceeded, and a chunk's leaf
+    section is always one of the sections it declares.
+    """
+    import random
+    import re as regex
+
+    random.seed(11)
+    for _ in range(200):
+        blocks = []
+        for index in range(random.randint(1, 14)):
+            section = random.choice([None, f"S{index}", f"P > S{index}", "P"])
+            if random.random() < 0.4 and section:
+                text = section.split(" > ")[-1]
+            else:
+                text = " ".join(random.choice(["alpha", "beta", "gamma"])
+                                for _ in range(random.randint(1, 120)))
+            blocks.append((text, random.choice([None, 1, 2]), section))
+        size = random.choice([100, 200, 300, 900])
+        overlap = min(random.choice([0, 20, 40, 140]), size - 1)
+
+        chunks = chunk_blocks(blocks, size, overlap)
+        joined = " ".join(chunk["content"] for chunk in chunks)
+        for text, _, _ in blocks:
+            for word in regex.sub(r"\s+", " ", text).strip().split():
+                assert word in joined, f"{word!r} was dropped"
+        for chunk in chunks:
+            assert len(chunk["content"]) <= size, f"{len(chunk['content'])} exceeds {size}"
+            if chunk["sections"]:
+                leaves = {path.split(" > ")[-1] for path in chunk["sections"]}
+                assert chunk["section"] in leaves
+
+
+def test_a_window_declares_only_the_sections_its_text_overlaps():
+    """Labels are read off each window's own span, not off the whole unit."""
+    headings = [(f"Chapter {index} — title words here title words", None, f"Chapter {index}")
+                for index in range(5)]
+    chunks = chunk_blocks(headings + [("L " * 400, None, "Long")], 300, 40)
+    heading_window = chunks[0]
+    assert "Long" not in heading_window["sections"], \
+        "a window of pure heading text may not claim the body beneath it"
+    body_window = chunks[1]
+    assert body_window["sections"] == ["Long"]

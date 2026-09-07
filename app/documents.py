@@ -95,15 +95,101 @@ def _docx_heading_level(paragraph: Any) -> int | None:
     return min(int(match.group(1)), 6)
 
 
-def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, overlap: int) -> list[dict]:
+Block = tuple[str, "int | None", "str | None"]
+
+
+def _units(blocks: list[Block]) -> list[list[Block]]:
+    """Group each run of text-less headings with the block it opens.
+
+    A heading names what comes after it, so it travels with that text and not
+    with the section before. Doing this before packing rather than during it is
+    what keeps a heading from ever being left alone: packing then only ever
+    sees units that already carry their own body.
+
+    A trailing run with nothing after it joins the unit before, since there is
+    nothing else to attach it to. A document of nothing but headings is one
+    unit, and `size` is all that bounds it.
+    """
+    units: list[list[Block]] = []
+    opening: list[Block] = []
+    for text, page, section in blocks:
+        if structure.heading_only(text, section):
+            opening.append((text, page, section))
+            continue
+        units.append(opening + [(text, page, section)])
+        opening = []
+    if opening:
+        if units:
+            units[-1].extend(opening)
+        else:
+            units.append(opening)
+    return units
+
+
+def _describe(parts: list[Block]) -> dict:
+    """The chunk a group of blocks makes: its text, sections and page."""
+    covered = list(dict.fromkeys(section for _, _, section in parts if section))
+    return {
+        "content": "\n".join(text for text, _, _ in parts).strip(),
+        "page": next((page for _, page, _ in parts if page is not None), None),
+        "section": (covered[0].split(structure.PATH_SEPARATOR)[-1] if covered else None),
+        "section_path": structure.merge_section_paths(covered),
+        "sections": covered,
+    }
+
+
+def _windows(parts: list[Block], size: int, overlap: int) -> list[dict]:
+    """Cut a unit too long for one chunk, labelling each window by its span.
+
+    Each block occupies a known range of the joined text, so a window declares
+    the sections it actually overlaps and is cited by the page that supplies
+    most of its characters. Reading the labels off the whole unit instead let a
+    window of pure heading text claim the body section beneath it.
+    """
+    spans: list[tuple[int, int, Block]] = []
+    cursor = 0
+    for part in parts:
+        spans.append((cursor, cursor + len(part[0]), part))
+        cursor += len(part[0]) + 1
+    text = "\n".join(part[0] for part in parts)
+
+    chunks: list[dict] = []
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + size)
+        if end < len(text):
+            boundary = max(text.rfind("\n", start, end), text.rfind(". ", start, end),
+                           text.rfind("؟", start, end))
+            if boundary > start + size // 2:
+                end = boundary + 1
+        piece = text[start:end].strip()
+        if piece:
+            here = [(min(end, stop) - max(start, begin), block)
+                    for begin, stop, block in spans if begin < end and stop > start]
+            covered = list(dict.fromkeys(block[2] for _, block in here if block[2]))
+            page = next((block[1] for _, block in sorted(here, key=lambda item: -item[0])
+                         if block[1] is not None), None)
+            chunks.append({
+                "content": piece,
+                "page": page,
+                "section": (covered[0].split(structure.PATH_SEPARATOR)[-1] if covered else None),
+                "section_path": structure.merge_section_paths(covered),
+                "sections": covered,
+            })
+        if end >= len(text):
+            break
+        start = max(start + 1, end - overlap)
+    return chunks
+
+
+def chunk_blocks(blocks: list[Block], size: int, overlap: int) -> list[dict]:
     """Cut blocks into chunks that follow the document's own divisions.
 
-    `extract` emits one block per section, so two things have to happen here.
-    A section longer than `size` is split as before, and every piece keeps its
-    path. Sections shorter than `size` are packed together, because a chunk per
-    heading shreds a short document: measured on the golden set, per-section
-    chunks tripled the chunk count and cost 8 points of MRR, all of it
-    granularity rather than structure (eval/BASELINE.md).
+    `extract` emits one block per section. Sections shorter than `size` are
+    packed together, because a chunk per heading shreds a short document:
+    measured on the golden set, per-section chunks tripled the chunk count and
+    cost 8 points of MRR, all of it granularity rather than structure
+    (eval/BASELINE.md).
 
     `size` is the only bound on packing, and a chunk carries the list of every
     section it covers. Refusing to pack across a chapter boundary was tried and
@@ -113,123 +199,36 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
     `size` - in a document whose chapters are long enough for the distinction
     to matter, each chapter is split on its own anyway.
 
-    One block never travels backwards: a heading with no text of its own goes
-    with the section it opens, never on the end of the one before it and never
-    alone. A chunk ending in a heading leaves that heading's own text in the
-    next chunk without it, which is the term a reader would search for.
+    Packing works on units, not blocks: a heading is glued to the text it opens
+    before any of this runs, so no arrangement of sizes can leave one stranded
+    in a chunk of its own or on the end of the section before it.
     """
     chunks: list[dict] = []
-    pending: list[tuple[str, int | None, str | None]] = []
+    pending: list[Block] = []
 
-    def emit(parts: list[tuple[str, int | None, str | None]]) -> None:
-        content = "\n".join(text for text, _, _ in parts).strip()
-        if not content:
-            return
-        covered = list(dict.fromkeys(section for _, _, section in parts if section))
-        chunks.append({
-            "content": content,
-            "page": next((page for _, page, _ in parts if page is not None), None),
-            "section": (covered[0].split(structure.PATH_SEPARATOR)[-1] if covered else None),
-            "section_path": structure.merge_section_paths(covered),
-            "sections": covered,
-        })
-
-    def split_trailing_headings() -> list[tuple[str, int | None, str | None]]:
-        """Take the headings off the end of `pending`; they open what follows."""
-        cut = len(pending)
-        while cut and structure.heading_only(pending[cut - 1][0], pending[cut - 1][2]):
-            cut -= 1
-        trailing = pending[cut:]
-        del pending[cut:]
-        return trailing
-
-    def window(text: str, page: int | None, section: str | None,
-               carried: list[tuple[str, int | None, str | None]]) -> None:
-        """Cut one oversized section, with any headings that open it."""
-        opening = "\n".join(part for part, _, _ in carried)
-        covered = list(dict.fromkeys([s for _, _, s in carried if s] + ([section] if section else [])))
-        first_page = next((p for _, p, _ in carried if p is not None), page)
-        body = f"{opening}\n{text}" if opening else text
-        start = 0
-        while start < len(body):
-            end = min(len(body), start + size)
-            if end < len(body):
-                boundary = max(body.rfind("\n", start, end), body.rfind(". ", start, end),
-                               body.rfind("؟", start, end))
-                if boundary > start + size // 2:
-                    end = boundary + 1
-            piece = body[start:end].strip()
-            if piece:
-                # A window declares what it actually holds: the opening
-                # headings only if it contains them, the long section only if
-                # it reaches past them. A window made entirely of carried text
-                # must not claim the section none of its words come from.
-                holds_opening = start < len(opening)
-                holds_body = end > len(opening)
-                here = ([s for s in covered if s != section] if holds_opening else [])
-                if holds_body and section:
-                    here = here + [section]
-                here = list(dict.fromkeys(here))
-                # The page of whichever part supplies most of this window, so a
-                # window that is nearly all body text is not cited by the page
-                # its heading happened to sit on.
-                carried_here = max(0, min(end, len(opening)) - start)
-                chunks.append({
-                    "content": piece,
-                    "page": first_page if carried_here * 2 > (end - start) else page,
-                    "section": (here[0].split(structure.PATH_SEPARATOR)[-1] if here else None),
-                    "section_path": structure.merge_section_paths(here),
-                    "sections": here,
-                })
-            if end >= len(body):
-                break
-            start = max(start + 1, end - overlap)
-
-    def pending_length() -> int:
-        return sum(len(text) + 1 for text, _, _ in pending)
-
-    for text, page, section in blocks:
-        clean = re.sub(r"[ \t]+", " ", text).strip()
-        if not clean:
-            continue
-        if len(clean) > size:
-            # Every pending heading opens the section that follows, however
-            # many there are. Emitting them separately would produce the
-            # body-less chunk this is here to avoid; `window` labels each
-            # window by what it actually holds.
-            carried = split_trailing_headings()
-            emit(pending)
+    def flush() -> None:
+        if pending:
+            described = _describe(pending)
+            if described["content"]:
+                chunks.append(described)
             pending.clear()
-            window(clean, page, section, carried)
-            continue
-        if pending_length() + len(clean) > size:
-            carried = split_trailing_headings()
-            if not pending:
-                # Nothing but headings, and they have already outgrown `size`.
-                # There is no body to attach them to, so respect the bound.
-                emit(carried)
-                carried = []
-            else:
-                emit(pending)
-            pending.clear()
-            pending.extend(carried)
-        pending.append((clean, page, section))
 
-    if pending:
-        trailing = "\n".join(text for text, _, _ in pending)
-        fits = bool(chunks) and len(chunks[-1]["content"]) + 1 + len(trailing) <= size
-        if fits and all(structure.heading_only(text, section) for text, _, section in pending):
-            # Nothing follows these headings, so they join what came before
-            # rather than becoming a chunk with no text in it.
-            last = chunks[-1]
-            last["content"] = f'{last["content"]}\n{trailing}'
-            merged = list(dict.fromkeys(last["sections"] + [s for _, _, s in pending if s]))
-            last["sections"] = merged
-            last["section_path"] = structure.merge_section_paths(merged)
-            # Same rule `emit` uses, so the two paths cannot drift apart.
-            last["section"] = merged[0].split(structure.PATH_SEPARATOR)[-1] if merged else None
-        else:
-            emit(pending)
+    def length(parts: list[Block]) -> int:
+        return sum(len(text) + 1 for text, _, _ in parts)
+
+    for unit in _units(blocks):
+        unit = [(re.sub(r"[ \t]+", " ", text).strip(), page, section) for text, page, section in unit]
+        unit = [part for part in unit if part[0]]
+        if not unit:
+            continue
+        if length(unit) > size:
+            flush()
+            chunks.extend(_windows(unit, size, overlap))
+            continue
+        if length(pending) + length(unit) > size:
+            flush()
+        pending.extend(unit)
+    flush()
     return chunks
 
 
