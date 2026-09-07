@@ -53,18 +53,34 @@ def extract(filename: str, payload: bytes) -> list[tuple[str, int | None, str | 
         return blocks
     if suffix == ".docx":
         doc = DocxDocument(io.BytesIO(payload))
-        blocks, stack = [], []
+        blocks: list[tuple[str, int | None, str | None]] = []
+        stack: list[tuple[int, str]] = []
+        opening: list[str] = []
         for paragraph in doc.paragraphs:
             text = paragraph.text.strip()
             if not text:
                 continue
             level = _docx_heading_level(paragraph)
             if level is not None:
+                # A heading is also the first line of its own section. Every
+                # other format keeps it in the text, and without it a term that
+                # appears only in a heading is missing from the BM25 postings
+                # for Word documents alone. It joins the section's first
+                # paragraph rather than standing as a block of its own, which
+                # would leave a chunk holding a heading and nothing else.
+                if opening:
+                    blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
                 stack = [(lv, t) for lv, t in stack if lv < level] + [(level, text)]
-            # A heading is also the first line of its own section. Every other
-            # format keeps it in the text; a heading-only term would otherwise
-            # be missing from the BM25 postings for Word documents alone.
+                opening = [text]
+                continue
+            if opening:
+                opening.append(text)
+                blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
+                opening = []
+                continue
             blocks.append((text, None, structure.join_path(stack) or None))
+        if opening:
+            blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
         return blocks
     text = payload.decode("utf-8", errors="replace")
     if suffix in {".html", ".htm"}:

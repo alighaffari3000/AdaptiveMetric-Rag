@@ -284,3 +284,75 @@ def test_the_path_separator_is_not_produced_by_a_single_heading():
     text = "# Only\n\nbody\n"
     spans = section_paths(text, detect_markdown(text))
     assert PATH_SEPARATOR not in spans[-1][2]
+
+
+@pytest.mark.parametrize("line", [
+    "تبصره:", "ماده ۱۲:", "فصل اول:", "Article 5:", "Section 4.",
+])
+def test_a_heading_may_end_in_a_colon_or_a_full_stop(line):
+    """Both are ordinary heading punctuation, and _clean_title strips them."""
+    assert detect_plain(line + "\nbody\n"), f"{line!r} should still read as a heading"
+
+
+def test_a_leading_horizontal_rule_is_not_front_matter():
+    """Skipping to the next "---" would swallow every heading between them."""
+    text = "---\n\n# Introduction\n\nbody\n\n## Setup\n\nmore\n\n---\n\n# Appendix\n\ntail\n"
+    assert [h.title for h in detect_markdown(text)] == ["Introduction", "Setup", "Appendix"]
+
+
+def test_front_matter_still_recognised_when_it_carries_keys():
+    text = "---\ntitle: HR policy\nauthor: Ops\n---\n\n# Real heading\n\nbody\n"
+    assert [h.title for h in detect_markdown(text)] == ["Real heading"]
+
+
+def test_a_dotted_number_splits_sections_at_ingest_but_not_when_quoting():
+    """"4.2.1 Rollback" and "7.4.0 fixes the leak" are indistinguishable.
+
+    At ingest a false positive only adds a section boundary. When splitting a
+    chunk to quote from it, a false positive makes the line unquotable, so the
+    reader is never shown the sentence that answers.
+    """
+    from app.structure import looks_like_heading
+
+    line = "7.4.0 fixes the memory leak"
+    assert looks_like_heading(line) is True
+    assert looks_like_heading(line, unambiguous=True) is False
+    # An unmistakable heading is one under either reading.
+    for certain in ("## Setup", "ماده ۳ — معامله کوچک"):
+        assert looks_like_heading(certain, unambiguous=True) is True
+
+
+def test_a_word_heading_joins_its_first_paragraph_rather_than_standing_alone():
+    """A heading followed by an oversized paragraph must not chunk by itself."""
+    import io as byte_io
+
+    from docx import Document
+
+    document = Document()
+    document.add_heading("Rollback procedure", level=1)
+    document.add_paragraph("word " * 400)
+    buffer = byte_io.BytesIO()
+    document.save(buffer)
+
+    chunks = chunk_blocks(extract("runbook.docx", buffer.getvalue()), 300, 40)
+    assert "Rollback procedure" in chunks[0]["content"]
+    assert chunks[0]["content"].strip() != "Rollback procedure", \
+        "a chunk holding only a heading carries no answer and still competes"
+
+
+def test_back_to_back_word_headings_do_not_each_become_a_chunk():
+    import io as byte_io
+
+    from docx import Document
+
+    document = Document()
+    document.add_heading("Alpha", level=1)
+    document.add_heading("Beta", level=2)
+    document.add_paragraph("Body under beta.")
+    buffer = byte_io.BytesIO()
+    document.save(buffer)
+
+    chunks = chunk_blocks(extract("nested.docx", buffer.getvalue()), 900, 100)
+    assert len(chunks) == 1
+    assert chunks[0]["section_path"] == "Alpha > Beta"
+    assert "Body under beta." in chunks[0]["content"]

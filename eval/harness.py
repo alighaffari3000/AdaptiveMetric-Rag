@@ -196,7 +196,7 @@ def all_chunks() -> list[dict[str, Any]]:
     from app import database
 
     return database.rows(
-        "SELECT c.id,c.content,c.page,c.section,c.section_path,c.metadata,d.name document_name "
+        "SELECT c.id,c.content,c.page,c.section,c.section_path,d.name document_name "
         "FROM chunks c JOIN documents d ON d.id=c.document_id"
     )
 

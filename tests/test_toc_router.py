@@ -60,7 +60,7 @@ def run(coro):
 def test_a_valid_reply_selects_those_sections(monkeypatch):
     stub_completion(monkeypatch, json.dumps({"sections": ["فصل دوم — مرخصی > مرخصی استعلاجی"]}))
     chosen = run(route(settings(), "سقف مرخصی استعلاجی چند روز است؟", TOC))
-    assert chosen == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
+    assert [entry["path"] for entry in chosen] == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
 
 
 def test_an_invented_heading_is_dropped(monkeypatch):
@@ -73,23 +73,24 @@ def test_a_half_valid_reply_keeps_only_the_valid_half(monkeypatch):
     stub_completion(monkeypatch, json.dumps({
         "sections": ["فصل سوم — جبران خدمات > پاداش عملکرد", "فصل بیستم — چیزی که وجود ندارد"]
     }))
-    assert run(route(settings(), "پاداش چقدر است؟", TOC)) == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
+    chosen = run(route(settings(), "پاداش چقدر است؟", TOC))
+    assert [entry["path"] for entry in chosen] == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
 
 
 def test_a_retyped_heading_still_matches_across_spelling_variants():
     # Arabic yeh and kaf, an Arabic-Indic digit, and a different dash.
     proposed = ["فصل دوم - مرخصي استعلاجي"]
-    assert constrain(proposed, TOC, 3) == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
+    assert [e["path"] for e in constrain(proposed, TOC, 3)] == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
 
 
 def test_two_sibling_headings_never_collapse_into_each_other():
     """"استحقاقی" and "استعلاجی" differ by two letters and mean different things."""
-    assert constrain(["مرخصی استحقاقی"], TOC, 3) == ["فصل دوم — مرخصی > مرخصی استحقاقی"]
-    assert constrain(["مرخصی استعلاجی"], TOC, 3) == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
+    assert [e["path"] for e in constrain(["مرخصی استحقاقی"], TOC, 3)] == ["فصل دوم — مرخصی > مرخصی استحقاقی"]
+    assert [e["path"] for e in constrain(["مرخصی استعلاجی"], TOC, 3)] == ["فصل دوم — مرخصی > مرخصی استعلاجی"]
 
 
 def test_a_bare_title_resolves_to_its_full_path():
-    assert constrain(["پاداش عملکرد"], TOC, 3) == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
+    assert [e["path"] for e in constrain(["پاداش عملکرد"], TOC, 3)] == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
 
 
 def test_the_section_limit_is_respected():
@@ -99,7 +100,7 @@ def test_the_section_limit_is_respected():
 
 def test_duplicates_in_the_reply_are_collapsed():
     path = TOC[0]["path"]
-    assert constrain([path, path, path], TOC, 3) == [path]
+    assert [e["path"] for e in constrain([path, path, path], TOC, 3)] == [path]
 
 
 def test_an_empty_selection_is_a_valid_answer(monkeypatch):
@@ -122,7 +123,8 @@ def test_a_provider_failure_is_reported_as_unavailable(monkeypatch):
 
 def test_json_wrapped_in_a_code_fence_is_read(monkeypatch):
     stub_completion(monkeypatch, '```json\n{"sections": ["پاداش عملکرد"]}\n```')
-    assert run(route(settings(), "q", TOC)) == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
+    chosen = run(route(settings(), "q", TOC))
+    assert [entry["path"] for entry in chosen] == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
 
 
 def test_the_prompt_carries_every_heading_and_asks_for_exact_copies(monkeypatch):
@@ -200,7 +202,9 @@ def test_a_prefixed_label_still_selects_the_chunk_it_names():
             {"document_name": "b.md", "sections": ["Guide > Pay"]}]
     toc = toc_from_rows(rows)
     chosen = constrain([entry["label"] for entry in toc if entry["document_name"] == "a.md"], toc, 3)
-    assert chosen == ["Guide > Leave"]
+    assert [entry["path"] for entry in chosen] == ["Guide > Leave"]
+    # The prefix has to reach selection, or b.md's identically named section
+    # is selected too and the router narrows to the wrong document's chunks.
     assert matching_positions(rows, chosen) == [0]
 
 

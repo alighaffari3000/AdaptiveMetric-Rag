@@ -208,18 +208,8 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"  negatives: {type(exc).__name__}: {exc}")
             dropped["failed"] += 1
 
-    seen: set[str] = set()
-    unique = []
-    for case in drafted:
-        if case.id in seen:
-            # Ids are generated from a single counter, so this means two chunks
-            # in the same document produced the same slug and number. Say so
-            # rather than dropping a record silently.
-            print(f"  dropped duplicate id {case.id!r}")
-            dropped["unparsed"] += 1
-            continue
-        seen.add(case.id)
-        unique.append(case)
+    # Ids come from one monotonic counter, so they cannot collide within a run.
+    unique = drafted
 
     header = [
         "// Machine-drafted candidates. NOT part of the evaluation.",

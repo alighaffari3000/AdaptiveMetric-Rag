@@ -42,6 +42,7 @@ logger = logging.getLogger("adaptive_metric_rag.toc_router")
 # Below this similarity a returned heading is treated as invented rather than
 # as a typo of a real one. High enough that two sibling headings differing by a
 # word ("مرخصی استحقاقی" / "مرخصی استعلاجی") never collapse into each other.
+COVERAGE_SEPARATOR = " | "
 MATCH_THRESHOLD = 0.86
 MAX_TOC_ENTRIES = 200
 TIMEOUT_SECONDS = 20.0
@@ -102,7 +103,7 @@ def parse_sections(raw: str) -> list[str]:
     return [entry.strip() for entry in entries if isinstance(entry, str) and entry.strip()]
 
 
-def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> list[str]:
+def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     """Keep only headings that exist, which is what makes this safe to act on.
 
     Exact match first, then normalized, then a similarity threshold for a
@@ -110,36 +111,40 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
     invented, and an invented heading would silently exclude the part of the
     document that actually holds the answer.
 
-    Matching runs against the label the model was shown, and what comes back is
-    the section path a chunk carries - never the label, which may be prefixed
-    with a document name that no chunk's path contains.
+    Matching runs against the label the model was shown, and a whole table of
+    contents entry comes back rather than a bare path. Two documents may name a
+    section identically, so returning only the path would select both and make
+    the document prefix in the label decorative.
     """
     if not proposed or not toc:
         return []
-    exact: dict[str, str] = {}
-    folded: dict[str, str] = {}
+    exact: dict[str, dict[str, Any]] = {}
+    folded: dict[str, dict[str, Any]] = {}
     for entry in toc:
         label = entry.get("label", entry["path"])
-        exact.setdefault(label, entry["path"])
-        exact.setdefault(entry["path"], entry["path"])
+        exact.setdefault(label, entry)
+        exact.setdefault(entry["path"], entry)
         for form in (label, entry["path"], entry["title"]):
-            folded.setdefault(normalize_heading(form), entry["path"])
+            folded.setdefault(normalize_heading(form), entry)
 
-    kept: list[str] = []
+    kept: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for candidate in proposed:
         resolved = exact.get(candidate) or folded.get(normalize_heading(candidate))
         if resolved is None:
             target = normalize_heading(candidate)
             best, best_score = None, 0.0
-            for key, path in folded.items():
+            for key, entry in folded.items():
                 score = SequenceMatcher(None, target, key).ratio()
                 if score > best_score:
-                    best, best_score = path, score
+                    best, best_score = entry, score
             resolved = best if best_score >= MATCH_THRESHOLD else None
         if resolved is None:
             logger.info("router proposed a section that is not in the table of contents: %r", candidate)
             continue
-        if resolved not in kept:
+        identity = (resolved.get("document_name", ""), resolved["path"])
+        if identity not in seen:
+            seen.add(identity)
             kept.append(resolved)
         if len(kept) >= limit:
             break
@@ -183,7 +188,8 @@ def eligible(settings: AppSettings, toc: list[dict[str, Any]], chunk_count: int)
     )
 
 
-async def route(settings: AppSettings, question: str, toc: list[dict[str, Any]]) -> list[str]:
+async def route(settings: AppSettings, question: str,
+                toc: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Sections of `toc` the question probably belongs to; [] means search all."""
     from .providers import complete
 
@@ -204,21 +210,31 @@ async def route(settings: AppSettings, question: str, toc: list[dict[str, Any]])
     return constrain(parse_sections(raw), toc, settings.toc_router_max_sections)
 
 
-def matching_positions(rows: list[dict[str, Any]], sections: list[str]) -> list[int]:
-    """Row indices whose section path covers any of the chosen sections.
+def matching_positions(rows: list[dict[str, Any]], sections: list[Any]) -> list[int]:
+    """Row indices covering any of the chosen sections, in the named document.
 
     A packed chunk declares several sections at once, so membership is tested
-    against each section the chunk covers rather than against the joined string.
+    against each section the chunk covers rather than against the joined label.
+    A selection that names a document only matches that document's chunks, or
+    two files with an identically named section would select each other's.
     """
     if not sections:
         return []
-    wanted = {normalize_heading(section) for section in sections}
+    wanted: list[tuple[str, str]] = []
+    for section in sections:
+        if isinstance(section, dict):
+            wanted.append((section.get("document_name", ""), normalize_heading(section["path"])))
+        else:
+            wanted.append(("", normalize_heading(str(section))))
     positions: list[int] = []
     for position, row in enumerate(rows):
+        name = row.get("document_name", "")
         for path in row_sections(row):
             folded = normalize_heading(path)
             # A chosen parent section selects everything filed beneath it.
-            if any(folded == want or folded.startswith(f"{want} ") or want in folded for want in wanted):
+            if any((not document or document == name)
+                   and (folded == want or folded.startswith(f"{want} ") or want in folded)
+                   for document, want in wanted):
                 positions.append(position)
                 break
     return positions
@@ -230,4 +246,18 @@ def row_sections(row: dict[str, Any]) -> list[str]:
     if isinstance(sections, list) and sections:
         return [section for section in sections if section]
     path = row.get("section_path") or row.get("section") or ""
-    return [path] if path else []
+    if not path:
+        return []
+    if COVERAGE_SEPARATOR not in path:
+        return [path]
+    # A row written before the list existed carries the merged label. Splitting
+    # it is best-effort - a tail containing the path separator is ambiguous -
+    # but reading the whole label as one section is certainly wrong, and would
+    # hide every section after the first from the router.
+    from .structure import PATH_SEPARATOR
+
+    head, _, tail = path.rpartition(PATH_SEPARATOR)
+    if COVERAGE_SEPARATOR not in tail:
+        return [path]
+    prefix = f"{head}{PATH_SEPARATOR}" if head else ""
+    return [f"{prefix}{part.strip()}" for part in tail.split(COVERAGE_SEPARATOR) if part.strip()]

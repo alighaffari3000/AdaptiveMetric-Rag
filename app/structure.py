@@ -59,6 +59,7 @@ _DOTTED = re.compile(rf"^\s*({_NUM}+(?:\.{_NUM}+)*)\.?\s+\S.*$")
 
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
 _SETEXT = re.compile(r"^\s*(=+|-+)\s*$")
+_YAML_KEY = re.compile(r"^[A-Za-z_][\w.-]*\s*:")
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,10 @@ def _clean_title(text: str) -> str:
 # این است که همه کارکنان باید حضور داشته باشند", "Section 3 of the report was
 # written by the finance team" - runs to ten or more.
 MAX_HEADING_WORDS = 9
-_SENTENCE_END = (".", "،", ",", "؛", ";", "؟", "?", "!", "۔", ":")
+# Not "." or ":": "Section 4." and "ماده ۱۲:" are ordinary heading forms, and
+# `_clean_title` already strips a trailing colon. Prose that opens with a
+# heading keyword is caught by the word count instead.
+_SENTENCE_END = ("،", ",", "؛", ";", "؟", "?", "!", "۔")
 
 
 def _looks_like_prose(line: str) -> bool:
@@ -122,9 +126,17 @@ def _front_matter_end(lines: list[str]) -> int:
     """
     if not lines or lines[0].strip() != "---":
         return 0
+    keyed = False
     for index in range(1, min(len(lines), 200)):
-        if lines[index].strip() in {"---", "..."}:
-            return index + 1
+        stripped = lines[index].strip()
+        if stripped in {"---", "..."}:
+            # A leading "---" with no key above the closing one is a horizontal
+            # rule, and skipping to it would swallow the document's headings.
+            return index + 1 if keyed else 0
+        if _YAML_KEY.match(stripped):
+            keyed = True
+        elif stripped and not stripped.startswith(("-", " ", "\t", "#")):
+            return 0
     return 0
 
 
@@ -346,17 +358,30 @@ def build_toc(section_lists: list[list[str]]) -> list[dict[str, Any]]:
     return toc
 
 
-def looks_like_heading(line: str) -> bool:
+def looks_like_heading(line: str, unambiguous: bool = False) -> bool:
     """Whether a line is a heading rather than a sentence of the text.
 
     A heading is kept in its section's text so that a term appearing only in a
     heading is still findable. It is a label, though, so it must not be quoted
     back as the answer to the question it names.
+
+    `unambiguous` drops the bare dotted-number rule, which cannot tell
+    "4.2.1 Rollback procedure" from "7.4.0 fixes the memory leak". At ingest a
+    false positive only adds a section boundary; when splitting a chunk to
+    quote from it, a false positive makes that line unquotable, so the reader
+    would never be shown the sentence that answers.
     """
     stripped = line.strip()
     if not stripped:
         return False
-    return bool(_MARKDOWN_HEADING.match(stripped)) or _pattern_level(stripped) is not None
+    if _MARKDOWN_HEADING.match(stripped):
+        return True
+    if _looks_like_prose(stripped):
+        return False
+    patterns = _PERSIAN_PATTERNS + _ENGLISH_PATTERNS
+    if any(pattern.match(stripped) for _, pattern in patterns):
+        return True
+    return False if unambiguous else _pattern_level(stripped) is not None
 
 
 def detect(text: str, suffix: str) -> list[Heading]:

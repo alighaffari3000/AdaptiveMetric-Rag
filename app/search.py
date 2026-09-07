@@ -143,7 +143,8 @@ async def _route_to_sections(settings: AppSettings, query: str,
     chunk_ids = [snapshot.rows[position]["id"]
                  for position in matching_positions(snapshot.rows, sections)
                  if position in in_scope]
+    chosen = [entry["path"] for entry in sections]
     if not sections or not chunk_ids:
         return filters, [], elapsed
     logger.info("section routing narrowed %d chunks to %d", len(scope), len(chunk_ids))
-    return {**(filters or {}), "chunk_ids": chunk_ids}, sections, elapsed
+    return {**(filters or {}), "chunk_ids": chunk_ids}, chosen, elapsed

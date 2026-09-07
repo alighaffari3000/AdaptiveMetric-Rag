@@ -204,3 +204,40 @@ def test_evidence_still_prefers_a_matching_number_in_an_unstructured_chunk():
               "قرارداد یک سال اعتبار دارد.")
     assert "۲۴۰ میلیون ریال" in best_evidence("هزینه قرارداد چقدر است؟", source,
                                               "مبلغ قرارداد ۲۴۰ میلیون ریال است [1].")
+
+
+def test_a_heading_sharing_one_word_does_not_beat_a_body_holding_the_question():
+    """Heading and body have to be measured on the same scale.
+
+    Weighting a heading against a sentence score that tops out well below 1.0
+    let a section whose heading shared a third of the query win over one whose
+    text contained all of it.
+    """
+    from app.retrieval import best_evidence
+
+    content = ("## storage policy\nEverything else is unrelated boilerplate text.\n"
+               "## retention window\nFull backups remain ninety days.\n")
+    assert "ninety days" in best_evidence("storage backups remain", content)
+
+
+def test_a_body_line_starting_with_a_version_number_can_still_be_quoted():
+    from app.retrieval import best_evidence
+
+    content = "Release notes\n7.4.0 fixes the memory leak\nUpgrade before the end of the month.\n"
+    assert "7.4.0" in best_evidence("which release fixes the memory leak", content)
+
+
+def test_a_heading_with_no_text_under_it_is_not_quoted_as_an_answer():
+    """A chapter heading immediately followed by a subheading has no prose.
+
+    Such a group names a section and says nothing, so it must lose to any
+    group that carries text, and be used only when there is no other.
+    """
+    from app.retrieval import best_evidence
+
+    content = ("فصل اول — کلیات\nماده ۱:\nاین آیین‌نامه ترتیب انجام معاملات را تعیین می‌کند.\n"
+               "ماده ۲ — تعاریف\nمعامله کوچک تا پانصد میلیون ریال است.\n")
+    quote = best_evidence("مرخصی بدون حقوق حداکثر چقدر است؟", content)
+    assert quote.strip() != "فصل اول — کلیات"
+    assert best_evidence("کلیات", "فصل اول — کلیات\nفصل دوم — روش\n").strip(), \
+        "a chunk of nothing but headings still has to show something"
