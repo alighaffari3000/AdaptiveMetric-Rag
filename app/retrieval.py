@@ -104,22 +104,42 @@ def tokenize(text: str) -> list[str]:
     return [t for t in TOKEN_RE.findall(normalized) if len(t) > 1 and t not in PERSIAN_STOP and t not in ENGLISH_STOP]
 
 
-def _segments(content: str) -> list[tuple[str, list[str]]]:
+def _heading_titles(sections: list[str] | None) -> set[str]:
+    """Normalized leaf titles of the sections a chunk covers."""
+    from .structure import PATH_SEPARATOR
+
+    titles: set[str] = set()
+    for path in sections or []:
+        for part in str(path).split(PATH_SEPARATOR):
+            folded = " ".join(part.split()).strip().lower()
+            if folded:
+                titles.add(folded)
+    return titles
+
+
+def _segments(content: str, sections: list[str] | None = None) -> list[tuple[str, list[str]]]:
     """Split a chunk into (heading, sentences) groups along its heading lines.
 
     A packed chunk holds several sections. The heading is what links a question
     to the right one - often the only place the question's subject appears -
     while the answer is the prose underneath it. Keeping the two apart lets a
     heading select a section without being quoted as the answer to it.
+
+    The chunk's own section list is the authority on which lines are headings.
+    An HTML or Word heading arrives as plain text with no marker on it, so
+    re-deriving them from the text alone would read "Rollback procedure" as a
+    sentence and quote it as the answer to a question about rollback.
     """
     from .structure import looks_like_heading
 
+    titles = _heading_titles(sections)
     groups: list[tuple[str, list[str]]] = [("", [])]
     for line in content.split("\n"):
         line = line.strip()
         if not line:
             continue
-        if looks_like_heading(line, unambiguous=True):
+        folded = " ".join(line.split()).lower()
+        if folded in titles or looks_like_heading(line, unambiguous=True):
             groups.append((line, []))
             continue
         for part in re.split(r"(?<=[.!?؟؛])\s+", line):
@@ -129,7 +149,8 @@ def _segments(content: str) -> list[tuple[str, list[str]]]:
     return [group for group in groups if group[0] or group[1]]
 
 
-def best_evidence(query: str, content: str, answer: str = "") -> str:
+def best_evidence(query: str, content: str, answer: str = "",
+                  sections: list[str] | None = None) -> str:
     """Pick the sentence most responsible for a chunk matching the query."""
     query_terms = set(tokenize(query))
     answer_terms = set(tokenize(re.sub(r"\[\d+\]", "", answer)))
@@ -152,11 +173,11 @@ def best_evidence(query: str, content: str, answer: str = "") -> str:
         date_bonus = .45 if important_dates and important_dates & sentence_dates else 0
         return .55 * answer_overlap + .30 * query_overlap + .15 * combined_overlap + number_bonus + date_bonus, -len(sentence)
 
-    groups = _segments(content)
+    groups = _segments(content, sections)
     if not groups:
         return content[:320]
 
-    def group_score(group: tuple[str, list[str]]) -> float:
+    def group_score(group: tuple[str, list[str]]) -> tuple[float, bool]:
         heading, sentences = group
         # The heading says which section this is; the body says whether the
         # answer is in it. Both are measured the same way so neither can win on
@@ -164,12 +185,14 @@ def best_evidence(query: str, content: str, answer: str = "") -> str:
         # score that tops out well below 1.0 let a heading sharing one word of
         # the question beat a body containing all of it.
         body = max((overlap(sentence, important_terms) for sentence in sentences), default=0.0)
-        return .45 * overlap(heading, important_terms) + .55 * body
+        score = .45 * overlap(heading, important_terms) + .55 * body
+        # A group holding a heading and no text says what a section is called
+        # and nothing else, so it loses a tie to one that carries prose. It can
+        # still win outright: a clause written as "ماده ۵: سقف مرخصی سی روز است"
+        # puts its answer on the heading line.
+        return score, bool(sentences)
 
-    # A heading-only group carries no answer, only a label, so it is chosen
-    # only when the chunk is nothing but headings.
-    with_body = [group for group in groups if group[1]]
-    heading, sentences = max(with_body or groups, key=group_score)
+    heading, sentences = max(groups, key=group_score)
     if not sentences:
         return heading[:600]
     return max(sentences, key=sentence_score)[:600]

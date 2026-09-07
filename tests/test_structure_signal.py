@@ -241,3 +241,37 @@ def test_a_heading_with_no_text_under_it_is_not_quoted_as_an_answer():
     assert quote.strip() != "فصل اول — کلیات"
     assert best_evidence("کلیات", "فصل اول — کلیات\nفصل دوم — روش\n").strip(), \
         "a chunk of nothing but headings still has to show something"
+
+
+def test_an_answer_written_on_the_heading_line_can_still_be_quoted():
+    """Some clauses put the whole rule on the numbered line.
+
+    Excluding heading-only groups outright made those unquotable; they have to
+    lose a tie to prose, not be removed from consideration.
+    """
+    from app.retrieval import best_evidence
+
+    content = ("ماده ۵: سقف مرخصی استحقاقی سی روز است\n"
+               "ماده ۶ — تعاریف\nتعاریف در پیوست آمده است.\n")
+    assert "سی روز" in best_evidence("سقف مرخصی استحقاقی چند روز است؟", content)
+
+
+def test_the_chunk_s_own_sections_identify_its_heading_lines():
+    """An HTML or Word heading is plain text with no marker on it.
+
+    Re-deriving headings from the text alone reads "Rollback procedure" as a
+    sentence and quotes it back as the answer to a question about rollback.
+    """
+    from app.retrieval import best_evidence
+
+    content = "Release notes\nRollback procedure\nRun the revert script before midnight."
+    quote = best_evidence("what is the rollback procedure?", content,
+                          sections=["Release notes > Rollback procedure"])
+    assert "revert script" in quote
+
+
+def test_an_unknown_section_list_falls_back_to_reading_the_text():
+    from app.retrieval import best_evidence
+
+    content = "## مرخصی استعلاجی\nحداکثر هشت روز در سال است.\n## پاداش\nدو ماه حقوق پایه.\n"
+    assert "هشت روز" in best_evidence("سقف مرخصی استعلاجی چند روز است؟", content)

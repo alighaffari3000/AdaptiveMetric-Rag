@@ -41,25 +41,49 @@ _ORDINAL = ("اول|یکم|نخست|دوم|سوم|چهارم|پنجم|ششم|ه�
             "یازدهم|دوازدهم|سیزدهم|چهاردهم|پانزدهم|شانزدهم|هفدهم|هجدهم|نوزدهم|بیستم")
 
 # Ordered by nesting depth: a فصل contains ماده contains تبصره, so a تبصره
-# heading must not close the ماده above it.
+# heading must not close the ماده above it. Each pattern matches the numbering
+# only; what follows it is judged by `_titleish_tail`, because "Section 4." and
+# "Section 3 covers rollback and recovery." differ in their tail, not in their
+# numbering and not in how they end.
 _PERSIAN_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
-    (1, re.compile(rf"^\s*(?:فصل|باب)\s+(?:{_ORDINAL}|{_NUM}+)\s*[-—–:.]?.*$")),
-    (2, re.compile(rf"^\s*(?:بخش|مبحث|گفتار)\s+(?:{_ORDINAL}|{_NUM}+)\s*[-—–:.]?.*$")),
-    (2, re.compile(rf"^\s*ماده\s+{_NUM}+\s*[-—–:.]?.*$")),
-    (3, re.compile(rf"^\s*(?:تبصره|بند)\s*(?:{_NUM}+|{_ORDINAL})?\s*[-—–:.]?.*$")),
+    (1, re.compile(rf"^(?:فصل|باب)\s+(?:{_ORDINAL}|{_NUM}+)")),
+    (2, re.compile(rf"^(?:بخش|مبحث|گفتار)\s+(?:{_ORDINAL}|{_NUM}+)")),
+    (2, re.compile(rf"^ماده\s+{_NUM}+")),
+    (3, re.compile(rf"^(?:تبصره|بند)(?:\s+(?:{_NUM}+|{_ORDINAL}))?")),
 ]
 
 _ENGLISH_PATTERNS: list[tuple[int, re.Pattern[str]]] = [
-    (1, re.compile(r"^\s*(?:chapter|part)\s+(?:[0-9]+|[ivxlcdm]+)\b.*$", re.IGNORECASE)),
-    (2, re.compile(r"^\s*(?:section|article|appendix)\s+(?:[0-9]+|[ivxlcdm]+)\b.*$", re.IGNORECASE)),
+    (1, re.compile(r"^(?:chapter|part)\s+(?:[0-9]+|[ivxlcdm]+)\b", re.IGNORECASE)),
+    (2, re.compile(r"^(?:section|article|appendix)\s+(?:[0-9]+|[ivxlcdm]+)\b", re.IGNORECASE)),
 ]
 
 # "2.", "3.1", "4.2.1 Rollback" - depth comes from how many components there are.
-_DOTTED = re.compile(rf"^\s*({_NUM}+(?:\.{_NUM}+)*)\.?\s+\S.*$")
+_DOTTED = re.compile(rf"^({_NUM}+(?:\.{_NUM}+)*)\.?\s+\S.*$")
+
+# A title follows its numbering after a separator; a sentence just continues.
+_TITLE_SEPARATOR = re.compile(r"^[-—–:.،]")
+MAX_TITLE_WORDS_WITHOUT_SEPARATOR = 4
+
+
+def _titleish_tail(tail: str) -> bool:
+    """Whether what follows a numbering reads as a title rather than a clause.
+
+    Nothing at all ("تبصره ۱"), or a separator ("ماده ۱۲:", "Section 1. Network
+    summary", "فصل اول — کلیات"), or a short label with no separator
+    ("ماده ۱ طرفین قرارداد"). A sentence that merely opens with the keyword
+    ("ماده ۵ حقوق را تعیین می‌کند.") does none of these.
+    """
+    tail = tail.strip()
+    if not tail:
+        return True
+    if _TITLE_SEPARATOR.match(tail):
+        return True
+    return len(tail.split()) <= MAX_TITLE_WORDS_WITHOUT_SEPARATOR and not tail.endswith(".")
+
 
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
 _SETEXT = re.compile(r"^\s*(=+|-+)\s*$")
-_YAML_KEY = re.compile(r"^[A-Za-z_][\w.-]*\s*:")
+_YAML_KEY = re.compile(r"^[\"\']?[^\s:#][^:]*[\"\']?\s*:")
 
 
 @dataclass(frozen=True)
@@ -105,7 +129,8 @@ def _pattern_level(line: str) -> int | None:
     if not stripped or _looks_like_prose(line):
         return None
     for level, pattern in _PERSIAN_PATTERNS + _ENGLISH_PATTERNS:
-        if pattern.match(stripped):
+        match = pattern.match(stripped)
+        if match and _titleish_tail(stripped[match.end():]):
             return level
     dotted = _DOTTED.match(stripped)
     if dotted:
@@ -133,10 +158,8 @@ def _front_matter_end(lines: list[str]) -> int:
             # A leading "---" with no key above the closing one is a horizontal
             # rule, and skipping to it would swallow the document's headings.
             return index + 1 if keyed else 0
-        if _YAML_KEY.match(stripped):
+        if stripped and not stripped.startswith("#") and _YAML_KEY.match(stripped):
             keyed = True
-        elif stripped and not stripped.startswith(("-", " ", "\t", "#")):
-            return 0
     return 0
 
 

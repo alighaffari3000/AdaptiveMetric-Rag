@@ -42,7 +42,6 @@ logger = logging.getLogger("adaptive_metric_rag.toc_router")
 # Below this similarity a returned heading is treated as invented rather than
 # as a typo of a real one. High enough that two sibling headings differing by a
 # word ("مرخصی استحقاقی" / "مرخصی استعلاجی") never collapse into each other.
-COVERAGE_SEPARATOR = " | "
 MATCH_THRESHOLD = 0.86
 MAX_TOC_ENTRIES = 200
 TIMEOUT_SECONDS = 20.0
@@ -118,14 +117,17 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
     """
     if not proposed or not toc:
         return []
-    exact: dict[str, dict[str, Any]] = {}
-    folded: dict[str, dict[str, Any]] = {}
+    # A key can name a section in more than one document, and picking whichever
+    # was seen first would make the other unreachable. Every entry a reply could
+    # mean is kept, so an ambiguous answer searches all of them.
+    exact: dict[str, list[dict[str, Any]]] = {}
+    folded: dict[str, list[dict[str, Any]]] = {}
     for entry in toc:
         label = entry.get("label", entry["path"])
-        exact.setdefault(label, entry)
-        exact.setdefault(entry["path"], entry)
+        for key in (label, entry["path"]):
+            exact.setdefault(key, []).append(entry)
         for form in (label, entry["path"], entry["title"]):
-            folded.setdefault(normalize_heading(form), entry)
+            folded.setdefault(normalize_heading(form), []).append(entry)
 
     kept: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -134,21 +136,22 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
         if resolved is None:
             target = normalize_heading(candidate)
             best, best_score = None, 0.0
-            for key, entry in folded.items():
+            for key, entries in folded.items():
                 score = SequenceMatcher(None, target, key).ratio()
                 if score > best_score:
-                    best, best_score = entry, score
+                    best, best_score = entries, score
             resolved = best if best_score >= MATCH_THRESHOLD else None
-        if resolved is None:
+        if not resolved:
             logger.info("router proposed a section that is not in the table of contents: %r", candidate)
             continue
-        identity = (resolved.get("document_name", ""), resolved["path"])
-        if identity not in seen:
-            seen.add(identity)
-            kept.append(resolved)
+        for entry in resolved:
+            identity = (entry.get("document_name", ""), entry["path"])
+            if identity not in seen:
+                seen.add(identity)
+                kept.append(entry)
         if len(kept) >= limit:
             break
-    return kept
+    return kept[:limit]
 
 
 def toc_from_rows(rows: list[dict[str, Any]], positions: list[int] | None = None) -> list[dict[str, Any]]:
@@ -248,14 +251,14 @@ def row_sections(row: dict[str, Any]) -> list[str]:
     path = row.get("section_path") or row.get("section") or ""
     if not path:
         return []
+    from .structure import COVERAGE_SEPARATOR, PATH_SEPARATOR
+
     if COVERAGE_SEPARATOR not in path:
         return [path]
     # A row written before the list existed carries the merged label. Splitting
     # it is best-effort - a tail containing the path separator is ambiguous -
     # but reading the whole label as one section is certainly wrong, and would
     # hide every section after the first from the router.
-    from .structure import PATH_SEPARATOR
-
     head, _, tail = path.rpartition(PATH_SEPARATOR)
     if COVERAGE_SEPARATOR not in tail:
         return [path]

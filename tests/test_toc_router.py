@@ -384,3 +384,29 @@ def test_an_unknown_chunk_id_widens_rather_than_emptying_the_search(fresh_db):
     ghost = retrieve(question, 50, 5, {"chunk_ids": ["no-such-chunk"]}, embed(question), None, "linear")
     everything = retrieve(question, 50, 5, None, embed(question), None, "linear")
     assert [chunk["id"] for chunk in ghost.chunks] == [chunk["id"] for chunk in everything.chunks]
+
+
+def test_an_ambiguous_reply_selects_every_section_it_could_mean():
+    """Two documents may name a section identically.
+
+    Keeping only the first entry under that name made the other unreachable,
+    and the new document filter then narrowed the search to one of them chosen
+    arbitrarily.
+    """
+    rows = [{"document_name": "a.md", "sections": ["Guide > Leave"]},
+            {"document_name": "b.md", "sections": ["Guide > Leave"]}]
+    toc = toc_from_rows(rows)
+
+    ambiguous = constrain(["Leave"], toc, 3)
+    assert {entry["document_name"] for entry in ambiguous} == {"a.md", "b.md"}
+    assert matching_positions(rows, ambiguous) == [0, 1]
+
+    qualified = constrain(["b.md > Guide > Leave"], toc, 3)
+    assert [entry["document_name"] for entry in qualified] == ["b.md"]
+    assert matching_positions(rows, qualified) == [1]
+
+
+def test_the_section_limit_holds_even_when_one_reply_resolves_to_several():
+    rows = [{"document_name": f"{name}.md", "sections": ["Guide > Leave"]}
+            for name in ("a", "b", "c", "d")]
+    assert len(constrain(["Leave"], toc_from_rows(rows), 2)) == 2

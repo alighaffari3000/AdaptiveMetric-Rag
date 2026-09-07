@@ -356,3 +356,51 @@ def test_back_to_back_word_headings_do_not_each_become_a_chunk():
     assert len(chunks) == 1
     assert chunks[0]["section_path"] == "Alpha > Beta"
     assert "Body under beta." in chunks[0]["content"]
+
+
+@pytest.mark.parametrize("line", [
+    "Section 3 covers rollback and recovery.",
+    "بند ۲ حقوق پایه افزایش می‌یابد.",
+    "ماده ۵ حقوق را تعیین می‌کند.",
+])
+def test_a_sentence_opening_with_a_heading_keyword_is_still_a_sentence(line):
+    """What follows the numbering decides, not how the line ends.
+
+    "Section 4." is a heading and "Section 3 covers rollback." is not, and both
+    end in a full stop; the first has nothing after its number, the second
+    continues into a clause.
+    """
+    assert not detect_plain(line + "\nbody\n"), f"{line!r} is prose"
+
+
+@pytest.mark.parametrize("line", [
+    "تبصره ۱", "Chapter 4", "ماده ۱۲:", "Section 4.", "Section 1. Network summary",
+    "فصل اول — کلیات", "ماده ۱ طرفین قرارداد",
+])
+def test_a_numbering_followed_by_nothing_a_separator_or_a_short_label_is_a_heading(line):
+    assert detect_plain(line + "\nbody\n"), f"{line!r} should read as a heading"
+
+
+def test_front_matter_keys_do_not_have_to_be_english():
+    """A Persian-first corpus writes Persian keys, and its closing "---" would
+    otherwise be read as a setext underline."""
+    text = "---\nعنوان: راهنما\nنویسنده: واحد اداری\n---\n\n# سرفصل واقعی\n\nمتن\n"
+    assert [h.title for h in detect_markdown(text)] == ["سرفصل واقعی"]
+
+
+def test_consecutive_word_headings_never_strand_one_as_its_own_chunk():
+    """A title above a chapter above a long paragraph is the failing shape."""
+    import io as byte_io
+
+    from docx import Document
+
+    document = Document()
+    document.add_heading("HR Policy", level=0)
+    document.add_heading("Leave", level=1)
+    document.add_paragraph("word " * 200)
+    buffer = byte_io.BytesIO()
+    document.save(buffer)
+
+    chunks = chunk_blocks(extract("policy.docx", buffer.getvalue()), 300, 40)
+    assert "HR Policy" in chunks[0]["content"]
+    assert "word" in chunks[0]["content"], "no chunk may hold headings and nothing else"

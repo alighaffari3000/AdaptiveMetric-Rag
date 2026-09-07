@@ -65,13 +65,13 @@ def extract(filename: str, payload: bytes) -> list[tuple[str, int | None, str | 
                 # A heading is also the first line of its own section. Every
                 # other format keeps it in the text, and without it a term that
                 # appears only in a heading is missing from the BM25 postings
-                # for Word documents alone. It joins the section's first
-                # paragraph rather than standing as a block of its own, which
-                # would leave a chunk holding a heading and nothing else.
-                if opening:
-                    blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
+                # for Word documents alone. It waits for the section's first
+                # paragraph rather than becoming a block of its own, which would
+                # leave a chunk holding a heading and nothing else. Consecutive
+                # headings - a title above a chapter above a clause - all wait
+                # together, so none of them is ever stranded.
                 stack = [(lv, t) for lv, t in stack if lv < level] + [(level, text)]
-                opening = [text]
+                opening.append(text)
                 continue
             if opening:
                 opening.append(text)

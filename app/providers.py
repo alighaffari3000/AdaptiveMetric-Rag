@@ -130,7 +130,7 @@ def local_answer(question: str, chunks: list[dict[str, Any]], language: str) -> 
         return "سند مرتبطی پیدا نشد. لطفاً منبع مناسب اضافه کنید." if language == "fa" else "No relevant source was found. Please add a suitable document."
     excerpts = []
     for i, chunk in enumerate(chunks[:3], 1):
-        excerpt = best_evidence(question, chunk["content"]).strip()
+        excerpt = best_evidence(question, chunk["content"], sections=chunk.get("sections")).strip()
         if not excerpt:
             excerpt = chunk["content"][:320].strip()
         excerpts.append(f"{excerpt} [{i}]")
