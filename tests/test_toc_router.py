@@ -159,30 +159,49 @@ def test_a_document_without_a_table_of_contents_is_never_routed():
     assert eligible(settings(), TOC[:1], chunk_count=1000) is False
 
 
-def test_matching_positions_finds_every_chunk_that_covers_a_section():
+def test_matching_positions_reads_the_section_list_not_the_display_label():
+    """The label cannot be parsed back into sections; the list is the data."""
     rows = [
-        {"section_path": "فصل دوم — مرخصی > مرخصی استحقاقی | مرخصی استعلاجی"},
-        {"section_path": "فصل سوم — جبران خدمات > پاداش عملکرد"},
-        {"section_path": ""},
+        {"sections": ["فصل دوم — مرخصی > مرخصی استحقاقی", "فصل دوم — مرخصی > مرخصی استعلاجی"],
+         "section_path": "فصل دوم — مرخصی > مرخصی استحقاقی | مرخصی استعلاجی"},
+        {"sections": ["فصل سوم — جبران خدمات > پاداش عملکرد"]},
+        {"sections": []},
     ]
     assert matching_positions(rows, ["فصل دوم — مرخصی > مرخصی استعلاجی"]) == [0]
     assert matching_positions(rows, ["فصل سوم — جبران خدمات > پاداش عملکرد"]) == [1]
     assert matching_positions(rows, []) == []
 
 
+def test_a_row_written_before_section_lists_existed_falls_back_to_its_path():
+    rows = [{"section_path": "فصل دوم — مرخصی > مرخصی استعلاجی"}]
+    assert matching_positions(rows, ["فصل دوم — مرخصی > مرخصی استعلاجی"]) == [0]
+
+
 def test_choosing_a_parent_section_selects_everything_beneath_it():
-    rows = [{"section_path": "فصل دوم — مرخصی > مرخصی استعلاجی"},
-            {"section_path": "فصل سوم — جبران خدمات > پاداش عملکرد"}]
+    rows = [{"sections": ["فصل دوم — مرخصی > مرخصی استعلاجی"]},
+            {"sections": ["فصل سوم — جبران خدمات > پاداش عملکرد"]}]
     assert matching_positions(rows, ["فصل دوم — مرخصی"]) == [0]
 
 
 def test_the_contents_are_prefixed_by_document_only_when_several_are_in_scope():
-    rows = [{"document_name": "a.md", "section_path": "Guide > Leave"},
-            {"document_name": "b.md", "section_path": "Guide > Leave"}]
-    both = {entry["path"] for entry in toc_from_rows(rows)}
+    rows = [{"document_name": "a.md", "sections": ["Guide > Leave"]},
+            {"document_name": "b.md", "sections": ["Guide > Leave"]}]
+    both = {entry["label"] for entry in toc_from_rows(rows)}
     assert both == {"a.md > Guide > Leave", "b.md > Guide > Leave"}
-    single = {entry["path"] for entry in toc_from_rows(rows, [0])}
+    single = {entry["label"] for entry in toc_from_rows(rows, [0])}
     assert single == {"Guide > Leave"}
+
+
+def test_a_prefixed_label_still_selects_the_chunk_it_names():
+    """A chunk's own path carries no document name, so selection must resolve
+    the label back to the path or the router is a guaranteed no-op on any
+    library holding more than one document."""
+    rows = [{"document_name": "a.md", "sections": ["Guide > Leave"]},
+            {"document_name": "b.md", "sections": ["Guide > Pay"]}]
+    toc = toc_from_rows(rows)
+    chosen = constrain([entry["label"] for entry in toc if entry["document_name"] == "a.md"], toc, 3)
+    assert chosen == ["Guide > Leave"]
+    assert matching_positions(rows, chosen) == [0]
 
 
 # --- the pipeline around the router ---------------------------------------
@@ -199,12 +218,16 @@ def library(db):
         ("تا سقف دو ماه حقوق پایه", "فصل سوم — جبران خدمات > پاداش عملکرد"),
     ]
     db.execute("INSERT INTO documents VALUES('d','guide.md','text/markdown',10,3,'2026-01-01','{}')")
-    for position, (content, path) in enumerate(rows):
+    for position, (body, path) in enumerate(rows):
+        # Ingestion keeps a heading in the text of the section it opens, so a
+        # fixture that omits it would test a library this app never builds.
+        content = f'{path.split(" > ")[-1]}\n{body}'
         db.execute(
             "INSERT INTO chunks(id,document_id,position,page,section,section_path,content,vector,tokens,metadata) "
-            "VALUES(?,'d',?,NULL,?,?,?,?,?,'{}')",
+            "VALUES(?,'d',?,NULL,?,?,?,?,?,?)",
             (f"c{position}", position, path.split(" > ")[-1], path, content,
-             db.encode_vector(embed(content)), json_module.dumps(tokenize(content))),
+             db.encode_vector(embed(content)), json_module.dumps(tokenize(content)),
+             json_module.dumps({"sections": [path]})),
         )
     chunk_index.invalidate()
 
@@ -289,6 +312,21 @@ def test_narrowing_does_not_deflate_confidence(fresh_db, monkeypatch):
     assert selected["standout"] == same["standout"]
 
 
+def test_a_mis_routed_query_does_not_report_another_chunk_s_confidence(fresh_db, monkeypatch):
+    """Confidence has to describe what came back, not the library's best chunk.
+
+    Measuring it from the corpus maximum meant a router that narrowed to the
+    wrong section still reported the standing of the right one.
+    """
+    library(fresh_db)
+    question = "سقف مرخصی استعلاجی چند روز است؟"
+    plain = unrouted(question)
+    stub_completion(monkeypatch, json.dumps({"sections": ["فصل سوم — جبران خدمات > پاداش عملکرد"]}))
+    misrouted = run(search_module.search(settings(), question))
+    assert misrouted.routed_sections == ["فصل سوم — جبران خدمات > پاداش عملکرد"]
+    assert misrouted.confidence < plain.confidence
+
+
 def test_the_flag_being_off_leaves_the_old_path_untouched(fresh_db, monkeypatch):
     library(fresh_db)
     calls = []
@@ -302,3 +340,43 @@ def test_the_flag_being_off_leaves_the_old_path_untouched(fresh_db, monkeypatch)
 
 def test_routing_is_off_by_default():
     assert AppSettings().toc_router_enabled is False
+
+
+def test_routing_names_chunks_by_id_so_a_concurrent_write_cannot_redirect_it(fresh_db, monkeypatch):
+    """A row position is an offset into one snapshot, and snapshots change.
+
+    The router reads one snapshot and retrieval reads another. If the narrowing
+    travelled as positions, a delete in between would silently point the search
+    at whatever rows had shifted into those slots.
+    """
+    import json as json_module
+
+    from app.index import index as chunk_index
+    from app.retrieval import embed, retrieve, tokenize
+
+    library(fresh_db)
+    before = chunk_index.snapshot()
+    target = next(row for row in before.rows if "استعلاجی" in row["section_path"])
+    target_position = before.rows.index(target)
+
+    # Delete an earlier chunk: every later row shifts down by one.
+    fresh_db.execute("DELETE FROM chunks WHERE id='c0'")
+    chunk_index.invalidate()
+    after = chunk_index.snapshot()
+    assert after.rows.index(next(r for r in after.rows if r["id"] == target["id"])) != target_position, \
+        "the fixture must actually move the row for this test to mean anything"
+
+    narrowed = retrieve("سقف مرخصی استعلاجی چند روز است؟", 50, 5,
+                        {"chunk_ids": [target["id"]]}, embed("سقف مرخصی استعلاجی چند روز است؟"),
+                        None, "linear")
+    assert [chunk["id"] for chunk in narrowed.chunks] == [target["id"]]
+
+
+def test_an_unknown_chunk_id_widens_rather_than_emptying_the_search(fresh_db):
+    from app.retrieval import embed, retrieve
+
+    library(fresh_db)
+    question = "سقف مرخصی استعلاجی چند روز است؟"
+    ghost = retrieve(question, 50, 5, {"chunk_ids": ["no-such-chunk"]}, embed(question), None, "linear")
+    everything = retrieve(question, 50, 5, None, embed(question), None, "linear")
+    assert [chunk["id"] for chunk in ghost.chunks] == [chunk["id"] for chunk in everything.chunks]

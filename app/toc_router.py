@@ -69,7 +69,7 @@ def normalize_heading(text: str) -> str:
 
 
 def build_prompt(question: str, toc: list[dict[str, Any]]) -> tuple[str, str]:
-    listing = "\n".join(f"- {entry['path']}" for entry in toc[:MAX_TOC_ENTRIES])
+    listing = "\n".join(f"- {entry.get('label', entry['path'])}" for entry in toc[:MAX_TOC_ENTRIES])
     system = (
         "You locate where in a document an answer lives. You are given the document's table "
         "of contents and a question. Choose the sections most likely to contain the answer. "
@@ -109,14 +109,21 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
     heading the model retyped slightly. Anything that survives none of those is
     invented, and an invented heading would silently exclude the part of the
     document that actually holds the answer.
+
+    Matching runs against the label the model was shown, and what comes back is
+    the section path a chunk carries - never the label, which may be prefixed
+    with a document name that no chunk's path contains.
     """
     if not proposed or not toc:
         return []
-    exact = {entry["path"]: entry["path"] for entry in toc}
+    exact: dict[str, str] = {}
     folded: dict[str, str] = {}
     for entry in toc:
-        folded.setdefault(normalize_heading(entry["path"]), entry["path"])
-        folded.setdefault(normalize_heading(entry["title"]), entry["path"])
+        label = entry.get("label", entry["path"])
+        exact.setdefault(label, entry["path"])
+        exact.setdefault(entry["path"], entry["path"])
+        for form in (label, entry["path"], entry["title"]):
+            folded.setdefault(normalize_heading(form), entry["path"])
 
     kept: list[str] = []
     for candidate in proposed:
@@ -143,24 +150,27 @@ def toc_from_rows(rows: list[dict[str, Any]], positions: list[int] | None = None
     """The table of contents of whatever is in scope for this search.
 
     The paper routes inside one book. A library holds several, so a path is
-    prefixed with its document name when more than one document is in scope,
-    which keeps two documents' identically named sections apart.
+    shown to the model prefixed with its document name when more than one
+    document is in scope, which keeps two documents' identically named sections
+    apart. Each entry also keeps the unprefixed `path`, because that is what a
+    chunk actually carries and what selection has to match on.
     """
     from .structure import PATH_SEPARATOR, build_toc
 
     indices = positions if positions is not None else range(len(rows))
     selected = [rows[index] for index in indices if 0 <= index < len(rows)]
-    documents = {row.get("document_name", "") for row in selected}
-    paths: list[str] = []
+    qualified = len({row.get("document_name", "") for row in selected}) > 1
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for row in selected:
-        path = row.get("section_path") or ""
-        if not path:
-            continue
-        if len(documents) > 1:
-            paths.append(f"{row.get('document_name', '')}{PATH_SEPARATOR}{path}")
-        else:
-            paths.append(path)
-    return build_toc(paths)
+        name = row.get("document_name", "")
+        for entry in build_toc([row_sections(row)]):
+            label = f"{name}{PATH_SEPARATOR}{entry['path']}" if qualified else entry["path"]
+            if label in seen:
+                continue
+            seen.add(label)
+            entries.append({**entry, "label": label, "document_name": name})
+    return entries
 
 
 def eligible(settings: AppSettings, toc: list[dict[str, Any]], chunk_count: int) -> bool:
@@ -202,16 +212,22 @@ def matching_positions(rows: list[dict[str, Any]], sections: list[str]) -> list[
     """
     if not sections:
         return []
-    from .structure import _split_coverage
-
     wanted = {normalize_heading(section) for section in sections}
     positions: list[int] = []
     for position, row in enumerate(rows):
-        covered = _split_coverage(row.get("section_path") or "")
-        for path in covered:
+        for path in row_sections(row):
             folded = normalize_heading(path)
             # A chosen parent section selects everything filed beneath it.
             if any(folded == want or folded.startswith(f"{want} ") or want in folded for want in wanted):
                 positions.append(position)
                 break
     return positions
+
+
+def row_sections(row: dict[str, Any]) -> list[str]:
+    """The sections a chunk covers, as a list rather than a display label."""
+    sections = row.get("sections")
+    if isinstance(sections, list) and sections:
+        return [section for section in sections if section]
+    path = row.get("section_path") or row.get("section") or ""
+    return [path] if path else []

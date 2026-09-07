@@ -122,8 +122,8 @@ async def _route_to_sections(settings: AppSettings, query: str,
 
     snapshot = index.snapshot()
     document_id = (filters or {}).get("document_id")
-    scope = ([position for position, row in enumerate(snapshot.rows) if row["document_id"] == document_id]
-             if document_id else list(range(snapshot.size)))
+    scope = [position for position, row in enumerate(snapshot.rows)
+             if not document_id or row["document_id"] == document_id]
     toc = toc_from_rows(snapshot.rows, scope)
     if not eligible(settings, toc, len(scope)):
         return filters, [], None
@@ -139,9 +139,11 @@ async def _route_to_sections(settings: AppSettings, query: str,
         return filters, [], round((time.perf_counter() - started) * 1000)
     elapsed = round((time.perf_counter() - started) * 1000)
 
-    positions = matching_positions(snapshot.rows, sections)
-    positions = [position for position in positions if position in set(scope)]
-    if not sections or not positions:
+    in_scope = set(scope)
+    chunk_ids = [snapshot.rows[position]["id"]
+                 for position in matching_positions(snapshot.rows, sections)
+                 if position in in_scope]
+    if not sections or not chunk_ids:
         return filters, [], elapsed
-    logger.info("section routing narrowed %d chunks to %d", len(scope), len(positions))
-    return {**(filters or {}), "positions": positions}, sections, elapsed
+    logger.info("section routing narrowed %d chunks to %d", len(scope), len(chunk_ids))
+    return {**(filters or {}), "chunk_ids": chunk_ids}, sections, elapsed

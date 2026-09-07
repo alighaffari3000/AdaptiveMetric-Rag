@@ -61,7 +61,9 @@ def extract(filename: str, payload: bytes) -> list[tuple[str, int | None, str | 
             level = _docx_heading_level(paragraph)
             if level is not None:
                 stack = [(lv, t) for lv, t in stack if lv < level] + [(level, text)]
-                continue
+            # A heading is also the first line of its own section. Every other
+            # format keeps it in the text; a heading-only term would otherwise
+            # be missing from the BM25 postings for Word documents alone.
             blocks.append((text, None, structure.join_path(stack) or None))
         return blocks
     text = payload.decode("utf-8", errors="replace")
@@ -99,9 +101,17 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
     chunks tripled the chunk count and cost 8 points of MRR, all of it
     granularity rather than structure (eval/BASELINE.md).
 
-    Packing is bounded so a chunk never becomes the blind window this was meant
-    to replace. It stops at `size`, never crosses a top-level section, and the
-    chunk declares every section it ended up covering.
+    `size` is the only bound on packing, and a chunk carries the list of every
+    section it covers. Refusing to pack across a chapter boundary was tried and
+    measured: it triples the chunk count on this corpus and costs 5.7 points of
+    hit@5, taking the page-boundary fixture back to zero (eval/BASELINE.md). It
+    also buys less than it appears to, because packing only ever merges sections
+    smaller than `size` - in a document whose chapters are long enough for the
+    distinction to matter, each chapter is split on its own anyway.
+
+    What keeps a packed chunk from being the blind window this was meant to
+    replace is that it still begins and ends on a section boundary, and says
+    which sections it holds.
     """
     chunks: list[dict] = []
     pending: list[tuple[str, int | None, str | None]] = []
@@ -111,10 +121,12 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
             return
         content = "\n".join(text for text, _, _ in pending).strip()
         if content:
-            path = structure.merge_section_paths([section or "" for _, _, section in pending])
+            covered = list(dict.fromkeys(section for _, _, section in pending if section))
             page = next((page for _, page, _ in pending if page is not None), None)
             leaf = (pending[0][2] or "").split(structure.PATH_SEPARATOR)[-1] or None
-            chunks.append({"content": content, "page": page, "section": leaf, "section_path": path})
+            chunks.append({"content": content, "page": page, "section": leaf,
+                           "section_path": structure.merge_section_paths(covered),
+                           "sections": covered})
         pending.clear()
 
     def pending_length() -> int:
@@ -139,7 +151,8 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
                 if piece:
                     leaf = section.split(structure.PATH_SEPARATOR)[-1] if section else None
                     chunks.append({"content": piece, "page": page, "section": leaf,
-                                   "section_path": section or ""})
+                                   "section_path": section or "",
+                                   "sections": [section] if section else []})
                 if end >= len(clean):
                     break
                 start = max(start + 1, end - overlap)
@@ -178,7 +191,7 @@ async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: i
          for piece in pieces],
     )
     now = datetime.now(timezone.utc).isoformat()
-    toc = structure.build_toc([piece.get("section_path", "") for piece in pieces])
+    toc = structure.build_toc([piece.get("sections") or [] for piece in pieces])
     metadata = database.json_value({"sha256": content_digest(payload), "toc": toc})
     with database.connect() as db:
         db.execute(
@@ -192,7 +205,10 @@ async def ingest(filename: str, content_type: str, payload: bytes, chunk_size: i
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (uuid.uuid4().hex, doc_id, position, piece["page"], piece["section"],
                  piece.get("section_path", ""), text,
-                 database.encode_vector(vector), database.json_value(tokenize(text)), "{}"),
+                 database.encode_vector(vector), database.json_value(tokenize(text)),
+                 # The display path is a label and cannot be parsed back into
+                 # the sections it names; the list is the data.
+                 database.json_value({"sections": piece.get("sections") or []})),
             )
     index.invalidate()
     return {"id": doc_id, "name": filename, "type": content_type, "size": len(payload), "chunks": len(pieces), "created_at": now}

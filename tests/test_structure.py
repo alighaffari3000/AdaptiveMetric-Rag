@@ -81,6 +81,11 @@ def test_numbering_conventions_across_scripts(line):
     "مبلغ کل قرارداد ۲۴۰ میلیون ریال است و در چهار قسط پرداخت می‌شود",
     "In 2026 the network handled 4.18 million shipments across the region",
     "1 shipment was delayed,",
+    # A sentence that opens with a heading keyword is still a sentence.
+    "بند اول این است که همه کارکنان باید در دفتر حضور داشته باشند",
+    "Section 3 of the report was written by the finance team last quarter",
+    "3.5 percent of the fleet was replaced during the reporting year",
+    "این آیین‌نامه ترتیب انجام معاملات شرکت را تعیین می‌کند.",
 ])
 def test_prose_is_not_mistaken_for_a_heading(line):
     assert not detect_plain(line + "\n"), f"{line!r} is prose, not a heading"
@@ -89,8 +94,35 @@ def test_prose_is_not_mistaken_for_a_heading(line):
 def test_html_headings_survive_instead_of_being_flattened():
     html = "<h1>Release notes</h1><p>intro</p><h2>7.4.0</h2><p>scheduler change</p>"
     blocks = detect_html(html)
-    assert ("intro", None, "Release notes") in blocks
+    assert any(path == "Release notes" and "intro" in text for text, _, path in blocks)
     assert any(path == "Release notes > 7.4.0" for _, _, path in blocks)
+
+
+def test_a_heading_stays_in_the_text_of_the_section_it_opens():
+    """Otherwise a term that appears only in a heading is lexically unfindable.
+
+    Markdown and plain text keep it because their sections are sliced out of
+    the raw string; HTML and Word have to put it back deliberately.
+    """
+    blocks = detect_html("<h1>Notes</h1><h2>Rollback procedure</h2><p>Run the revert script.</p>")
+    body = next(text for text, _, path in blocks if "Rollback" in path)
+    assert "Rollback procedure" in body
+
+
+def test_word_headings_stay_in_the_text_too():
+    import io as byte_io
+
+    from docx import Document
+
+    document = Document()
+    document.add_heading("Rollback procedure", level=1)
+    document.add_paragraph("Run the revert script.")
+    buffer = byte_io.BytesIO()
+    document.save(buffer)
+
+    chunk = chunk_blocks(extract("runbook.docx", buffer.getvalue()), 900, 100)[0]
+    assert "Rollback procedure" in chunk["content"]
+    assert "Rollback procedure" in chunk["section_path"]
 
 
 def test_html_without_headings_still_yields_its_text():
@@ -127,11 +159,43 @@ def test_a_packed_chunk_declares_every_section_it_covers():
     blocks = [("alpha", None, "Root > A"), ("beta", None, "Root > B"), ("gamma", None, "Root > C")]
     chunk = chunk_blocks(blocks, 900, 100)[0]
     assert chunk["section_path"] == "Root > A | B | C"
-    assert build_toc([chunk["section_path"]]) == [
+    assert chunk["sections"] == ["Root > A", "Root > B", "Root > C"]
+    assert build_toc([chunk["sections"]]) == [
         {"path": "Root > A", "title": "A", "depth": 2},
         {"path": "Root > B", "title": "B", "depth": 2},
         {"path": "Root > C", "title": "C", "depth": 2},
     ]
+
+
+def test_the_covered_sections_are_carried_as_data_not_parsed_from_the_label():
+    """The label is ambiguous once a tail contains the separator itself.
+
+    "A > B | C > d" could be two sections or three, so nothing may recover the
+    list from the string; the list travels with the chunk.
+    """
+    blocks = [("one", None, "A > B"), ("two", None, "A > C > d")]
+    chunk = chunk_blocks(blocks, 900, 100)[0]
+    assert chunk["sections"] == ["A > B", "A > C > d"]
+    assert [entry["path"] for entry in build_toc([chunk["sections"]])] == ["A > B", "A > C > d"]
+
+
+def test_a_document_of_several_chapters_yields_a_complete_table_of_contents():
+    """Each section appears once, whichever chunk ended up carrying it."""
+    text = ("# Guide\n\n## One\n\nfirst body\n\n### Deep\n\ndeeper body\n\n"
+            "## Two\n\nsecond body\n")
+    chunks = chunk_blocks(extract("guide.md", text.encode("utf-8")), 900, 100)
+    paths = [entry["path"] for entry in build_toc([chunk["sections"] for chunk in chunks])]
+    assert paths == ["Guide", "Guide > One", "Guide > One > Deep", "Guide > Two"]
+
+
+def test_front_matter_does_not_become_a_heading():
+    text = "---\ntitle: HR policy\nauthor: Ops\n---\n\n# Real heading\n\nbody\n"
+    assert [h.title for h in detect_markdown(text)] == ["Real heading"]
+
+
+def test_setext_headings_still_work_outside_front_matter():
+    text = "Big title\n=========\n\nbody\n\nSub\n---\n\nmore\n"
+    assert [(h.level, h.title) for h in detect_markdown(text)] == [(1, "Big title"), (2, "Sub")]
 
 
 def test_merging_shares_ancestry_once_and_keeps_a_single_path_intact():

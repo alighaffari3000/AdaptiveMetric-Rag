@@ -275,3 +275,12 @@ def test_no_generated_record_has_leaked_into_the_golden_set():
     """A machine label must be promoted by a person, never by a script."""
     for case in load_golden():
         assert "generated" not in case.tags, f"{case.id} was drafted, not reviewed"
+
+
+def test_drafted_ids_stay_unique_past_ten_questions_per_chunk():
+    """A chunk-index times ten scheme collided as soon as --per-chunk exceeded 10."""
+    from eval.make_questions import build_positive
+
+    passage = {"document_name": "guide.md", "content": "هشت روز", "section_path": ""}
+    ids = {build_positive(passage, "چند روز؟", "هشت روز", serial).id for serial in range(1, 40)}
+    assert len(ids) == 39

@@ -77,13 +77,23 @@ def _clean_title(text: str) -> str:
     return re.sub(r"\s*[-—–:]\s*$", "", title).strip()
 
 
+# A heading is a label, not a sentence. Every heading in the evaluation corpus
+# is five words or fewer; the prose that was being mistaken for one - "بند اول
+# این است که همه کارکنان باید حضور داشته باشند", "Section 3 of the report was
+# written by the finance team" - runs to ten or more.
+MAX_HEADING_WORDS = 9
+_SENTENCE_END = (".", "،", ",", "؛", ";", "؟", "?", "!", "۔", ":")
+
+
 def _looks_like_prose(line: str) -> bool:
     """Reject a numbered line that is really a sentence or a list item."""
     stripped = line.strip()
-    if len(stripped) > MAX_HEADING_LENGTH:
+    if not stripped or len(stripped) > MAX_HEADING_LENGTH:
         return True
-    # A heading does not end mid-sentence, and rarely ends in a full stop.
-    return stripped.endswith((",", "،", ";", "؛"))
+    if len(stripped.split()) > MAX_HEADING_WORDS:
+        return True
+    # A heading does not close like a sentence.
+    return stripped.endswith(_SENTENCE_END)
 
 
 def _pattern_level(line: str) -> int | None:
@@ -103,12 +113,31 @@ def _pattern_level(line: str) -> int | None:
     return None
 
 
+def _front_matter_end(lines: list[str]) -> int:
+    """Line index just past a YAML front matter block, or 0 when there is none.
+
+    Its closing "---" is a valid setext underline, so without this the line
+    above it becomes a heading and the top of the document gets filed under
+    something like "author: Ops".
+    """
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for index in range(1, min(len(lines), 200)):
+        if lines[index].strip() in {"---", "..."}:
+            return index + 1
+    return 0
+
+
 def detect_markdown(text: str) -> list[Heading]:
     headings: list[Heading] = []
     offset = 0
     lines = text.splitlines(keepends=True)
+    skip_until = _front_matter_end(lines)
     fenced = False
     for position, line in enumerate(lines):
+        if position < skip_until:
+            offset += len(line)
+            continue
         stripped = line.strip()
         if stripped.startswith("```") or stripped.startswith("~~~"):
             fenced = not fenced
@@ -116,7 +145,7 @@ def detect_markdown(text: str) -> list[Heading]:
             match = _MARKDOWN_HEADING.match(line.rstrip("\n"))
             if match:
                 headings.append(Heading(len(match.group(1)), _clean_title(match.group(2)), offset))
-            elif (headings or position) and _SETEXT.match(line) and position:
+            elif _SETEXT.match(line) and position > skip_until:
                 previous = lines[position - 1].strip()
                 if previous and not _MARKDOWN_HEADING.match(previous):
                     level = 1 if line.strip().startswith("=") else 2
@@ -167,6 +196,11 @@ def detect_html(payload: str) -> list[tuple[str, int | None, str]]:
             title = _clean_title(element.get_text(" ", strip=True))
             if title:
                 stack = [(lv, t) for lv, t in stack if lv < level] + [(level, title)]
+                # The heading opens its own section's text. Markdown and plain
+                # text keep it because their sections are sliced out of the raw
+                # string; dropping it here would make a term that appears only
+                # in a heading impossible to find lexically.
+                buffer.append(title)
         elif element.name in {"p", "li", "td", "th", "pre", "blockquote", "dd", "dt", "figcaption"}:
             if not element.find(["p", "li", "td", "th", "pre", "blockquote"]):
                 text = element.get_text(" ", strip=True)
@@ -265,15 +299,21 @@ def common_prefix(paths: list[str]) -> list[str]:
 
 
 def merge_section_paths(paths: list[str]) -> str:
-    """Declare every section a chunk covers, without repeating their ancestry.
+    """One readable line naming every section a chunk covers.
 
     Packing sibling sections into one chunk is a trade: it keeps chunks big
     enough to rank well, at the cost of a chunk that is about more than one
     thing. The chunk then has to say so, or the section path becomes a lie -
     it would name one heading while the text answers questions filed under
-    another. Shared ancestry is written once and the differing tails are listed:
+    another. Shared ancestry is written once and the differing tails listed:
 
         فصل اول > دورکاری | حضور در دفتر | ماموریت
+
+    This is a label, for a citation and for the structure signal to match
+    against. It is deliberately not a parseable encoding: a tail can itself
+    contain the path separator, so a reader cannot tell which "A > B > c | d"
+    was two sections or three. Code that needs the individual sections reads
+    the `sections` list carried alongside the chunk instead.
     """
     distinct = list(dict.fromkeys(path for path in paths if path))
     if not distinct:
@@ -292,36 +332,31 @@ def merge_section_paths(paths: list[str]) -> str:
     return f"{PATH_SEPARATOR.join(prefix)}{PATH_SEPARATOR}{joined}" if prefix else joined
 
 
-def top_level(path: str) -> str:
-    """The outermost section a path sits in; packing never crosses one."""
-    return path.split(PATH_SEPARATOR)[0] if path else ""
-
-
-def build_toc(paths: list[str]) -> list[dict[str, Any]]:
-    """A flat, ordered table of contents: one entry per distinct section path."""
+def build_toc(section_lists: list[list[str]]) -> list[dict[str, Any]]:
+    """A flat, ordered table of contents from the chunks' own section lists."""
     toc: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for path in paths:
-        for single in _split_coverage(path):
-            if single in seen:
+    for sections in section_lists:
+        for path in sections:
+            if not path or path in seen:
                 continue
-            seen.add(single)
-            parts = single.split(PATH_SEPARATOR)
-            toc.append({"path": single, "title": parts[-1], "depth": len(parts)})
+            seen.add(path)
+            parts = path.split(PATH_SEPARATOR)
+            toc.append({"path": path, "title": parts[-1], "depth": len(parts)})
     return toc
 
 
-def _split_coverage(path: str) -> list[str]:
-    """Expand a merged path back into the individual sections it covers."""
-    if not path:
-        return []
-    if COVERAGE_SEPARATOR not in path:
-        return [path]
-    head, _, tail = path.rpartition(PATH_SEPARATOR)
-    if COVERAGE_SEPARATOR not in tail:
-        return [path]
-    prefix = f"{head}{PATH_SEPARATOR}" if head else ""
-    return [f"{prefix}{part.strip()}" for part in tail.split(COVERAGE_SEPARATOR) if part.strip()]
+def looks_like_heading(line: str) -> bool:
+    """Whether a line is a heading rather than a sentence of the text.
+
+    A heading is kept in its section's text so that a term appearing only in a
+    heading is still findable. It is a label, though, so it must not be quoted
+    back as the answer to the question it names.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    return bool(_MARKDOWN_HEADING.match(stripped)) or _pattern_level(stripped) is not None
 
 
 def detect(text: str, suffix: str) -> list[Heading]:

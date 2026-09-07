@@ -152,3 +152,55 @@ def test_a_citation_without_a_path_is_still_valid():
     citation = Citation(id=1, document_id="d", document_name="notes.txt", chunk_id="c",
                         excerpt="…", score=0.5)
     assert citation.section_path == ""
+
+
+# --- quoting the right section of a packed chunk --------------------------
+
+PACKED = (
+    "### مرخصی استعلاجی\n"
+    "حداکثر هشت روز در سال با ارائه گواهی معتبر پزشک پذیرفته می‌شود.\n"
+    "### مرخصی بدون حقوق\n"
+    "تا سه ماه پیوسته، پس از دو سال سابقه.\n"
+    "### پاداش عملکرد\n"
+    "پاداش عملکرد تا سقف دو ماه حقوق پایه است.\n"
+)
+
+
+@pytest.mark.parametrize("question,expected", [
+    ("سقف مرخصی استعلاجی چند روز است؟", "هشت روز"),
+    ("مرخصی بدون حقوق حداکثر چقدر است؟", "سه ماه"),
+    ("پاداش عملکرد تا چند ماه حقوق است؟", "دو ماه حقوق پایه"),
+])
+def test_the_quote_comes_from_the_section_the_question_names(question, expected):
+    """A chunk covering three sections must answer from the right one.
+
+    The discriminating words often appear only in the heading: nothing in
+    "تا سه ماه پیوسته، پس از دو سال سابقه" says which kind of leave it is.
+    """
+    from app.retrieval import best_evidence
+
+    assert expected in best_evidence(question, PACKED)
+
+
+def test_a_heading_selects_its_section_without_being_quoted_as_the_answer():
+    from app.retrieval import best_evidence
+
+    quote = best_evidence("سقف مرخصی استعلاجی چند روز است؟", PACKED)
+    assert "###" not in quote
+    assert quote.strip() != "### مرخصی استعلاجی"
+
+
+def test_a_chunk_of_nothing_but_headings_still_yields_something_to_show():
+    from app.retrieval import best_evidence
+
+    assert best_evidence("پاداش عملکرد", "### مرخصی استعلاجی\n### پاداش عملکرد\n").strip()
+
+
+def test_evidence_still_prefers_a_matching_number_in_an_unstructured_chunk():
+    """The behaviour that existed before sections did must not have moved."""
+    from app.retrieval import best_evidence
+
+    source = ("قرارداد شماره ۱۳۷ در فروردین امضا شد. مبلغ کل قرارداد ۲۴۰ میلیون ریال است. "
+              "قرارداد یک سال اعتبار دارد.")
+    assert "۲۴۰ میلیون ریال" in best_evidence("هزینه قرارداد چقدر است؟", source,
+                                              "مبلغ قرارداد ۲۴۰ میلیون ریال است [1].")

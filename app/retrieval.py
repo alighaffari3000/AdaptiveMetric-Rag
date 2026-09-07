@@ -104,6 +104,31 @@ def tokenize(text: str) -> list[str]:
     return [t for t in TOKEN_RE.findall(normalized) if len(t) > 1 and t not in PERSIAN_STOP and t not in ENGLISH_STOP]
 
 
+def _segments(content: str) -> list[tuple[str, list[str]]]:
+    """Split a chunk into (heading, sentences) groups along its heading lines.
+
+    A packed chunk holds several sections. The heading is what links a question
+    to the right one - often the only place the question's subject appears -
+    while the answer is the prose underneath it. Keeping the two apart lets a
+    heading select a section without being quoted as the answer to it.
+    """
+    from .structure import looks_like_heading
+
+    groups: list[tuple[str, list[str]]] = [("", [])]
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if looks_like_heading(line):
+            groups.append((line, []))
+            continue
+        for part in re.split(r"(?<=[.!?؟؛])\s+", line):
+            part = part.strip()
+            if part:
+                groups[-1][1].append(part)
+    return [group for group in groups if group[0] or group[1]]
+
+
 def best_evidence(query: str, content: str, answer: str = "") -> str:
     """Pick the sentence most responsible for a chunk matching the query."""
     query_terms = set(tokenize(query))
@@ -111,11 +136,12 @@ def best_evidence(query: str, content: str, answer: str = "") -> str:
     important_terms = query_terms | answer_terms
     important_numbers = set(NUMBER_RE.findall(query + " " + answer))
     important_dates = set(DATE_RE.findall(query + " " + answer))
-    sentences = [part.strip() for part in re.split(r"(?<=[.!?؟؛])\s+|\n+", content) if part.strip()]
-    if not sentences:
-        return content[:320]
 
-    def evidence_score(sentence: str) -> tuple[float, int]:
+    def overlap(text: str, terms: set[str]) -> float:
+        found = set(tokenize(text))
+        return len(terms & found) / max(len(terms), 1)
+
+    def sentence_score(sentence: str) -> tuple[float, int]:
         terms = set(tokenize(sentence))
         answer_overlap = len(answer_terms & terms) / max(len(answer_terms), 1)
         query_overlap = len(query_terms & terms) / max(len(query_terms), 1)
@@ -126,8 +152,22 @@ def best_evidence(query: str, content: str, answer: str = "") -> str:
         date_bonus = .45 if important_dates and important_dates & sentence_dates else 0
         return .55 * answer_overlap + .30 * query_overlap + .15 * combined_overlap + number_bonus + date_bonus, -len(sentence)
 
-    selected = max(sentences, key=evidence_score)
-    return selected[:600]
+    groups = _segments(content)
+    if not groups:
+        return content[:320]
+
+    def group_score(group: tuple[str, list[str]]) -> float:
+        heading, sentences = group
+        # The heading says which section this is; the body says whether the
+        # answer is in it. Both count, and a section whose heading names the
+        # question wins over one that merely repeats a word of it.
+        best_sentence = max((sentence_score(s)[0] for s in sentences), default=0.0)
+        return .60 * overlap(heading, important_terms) + .40 * best_sentence
+
+    heading, sentences = max(groups, key=group_score)
+    if not sentences:
+        return heading[:600]
+    return max(sentences, key=sentence_score)[:600]
 
 
 def embed(text: str) -> list[float]:
@@ -370,7 +410,13 @@ def score_confidence(selected: list[dict[str, Any]], query_tokens: list[str],
     # stopword cannot quietly lower the confidence of a chunk that answers.
     coverage = _query_coverage(query_tokens, haystack)
     reranked = selected[0].get("rerank_score")
-    relevance = float(reranked) if reranked is not None else min(1.0, standout / STANDOUT_REFERENCE)
+    # A chunk below the corpus mean is not distinctive; it is not evidence
+    # against itself either. Left unclamped, a negative standout subtracted
+    # from the coverage term and drove confidence to zero for a chunk that
+    # answered the question, which is what happens whenever a search is
+    # narrowed to a section the embedding scores poorly.
+    relevance = (float(reranked) if reranked is not None
+                 else max(0.0, min(1.0, standout / STANDOUT_REFERENCE)))
     return max(0.0, min(1.0, .55 * relevance + .45 * coverage))
 
 
@@ -432,14 +478,20 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     # router guessed at, or narrowing to one section would make every answer
     # look unremarkable and the evidence gate would refuse it.
     scope = subset
-    # A caller that has already decided which rows are worth searching - the
+    # A caller that has already decided which chunks are worth searching - the
     # table-of-contents router is the one that does - narrows the corpus here.
+    # Chunks are named by id, never by row position: a position is an offset
+    # into one snapshot, and an ingest or delete between the caller's decision
+    # and this call would silently point it at different chunks.
     # An empty narrowing is treated as no narrowing, so the router can never
     # remove the only chunk that holds the answer.
-    positions = (filters or {}).get("positions")
-    if positions:
-        chosen = np.asarray(sorted(set(positions)), dtype=np.int64)
-        chosen = chosen[(chosen >= 0) & (chosen < snapshot.size)]
+    chunk_ids = (filters or {}).get("chunk_ids")
+    if chunk_ids:
+        wanted = set(chunk_ids)
+        chosen = np.fromiter(
+            (i for i, row in enumerate(snapshot.rows) if row["id"] in wanted),
+            dtype=np.int64,
+        )
         if chosen.size:
             subset = chosen if subset is None else np.intersect1d(subset, chosen)
             if not subset.size:
@@ -492,16 +544,27 @@ def retrieve(query: str, candidate_count: int = 100, context_count: int = 5, fil
     fused = (_weighted_rrf(arrays, analysis.weights) if fusion == "rank"
              else _weighted_sum(arrays, analysis.weights))
     # How far each chunk stands above the corpus, in standard deviations of the
-    # raw similarity; the best chunk's value is the result-level `standout`.
+    # raw similarity. The scale comes from the corpus the user is searching,
+    # before any narrowing a router applied, so routing to one section cannot
+    # make that section unremarkable against itself. The value, though, is the
+    # returned chunk's own: reporting the corpus maximum would describe a chunk
+    # the router may have excluded from the results entirely.
     pool = dense[scope] if scope is not None else dense
     pool_mean, pool_std = (float(pool.mean()), float(pool.std()) + 1e-9) if pool.size > 1 else (0.0, 1.0)
-    standout = float((pool.max() - pool_mean) / pool_std) if pool.size > 1 else 0.0
     for chunk, value in zip(scored, fused):
         chunk["score"] = round(float(value), 6)
         chunk["standout"] = round((chunk["features"]["dense"] - pool_mean) / pool_std, 3) if pool.size > 1 else 0.0
 
     scored.sort(key=lambda item: item["score"], reverse=True)
     selected = scored[:context_count]
+    # The most distinctive chunk among those actually returned. Reporting the
+    # corpus maximum instead described a chunk the caller may never see - a
+    # router that narrowed the search to the wrong section still reported the
+    # confidence of the right one. Reading the whole returned set rather than
+    # only its first member matches what `score_confidence` already does with
+    # coverage, and keeps a fused ranking from being punished when its top
+    # chunk won on an exact identifier rather than on similarity.
+    standout = max((float(chunk["standout"]) for chunk in selected), default=0.0)
     confidence = score_confidence(selected, analysis.query_tokens or qtokens, standout)
     top = selected[0]["score"] if selected else 0.0
     second = selected[1]["score"] if len(selected) > 1 else 0.0

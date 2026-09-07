@@ -160,6 +160,7 @@ async def main_async(args: argparse.Namespace) -> int:
 
     drafted: list[GoldenCase] = []
     dropped = {"unquoted": 0, "unparsed": 0, "failed": 0}
+    serial = 0  # a single counter, so --per-chunk above 10 cannot collide
 
     for index, chunk in enumerate(chunks):
         try:
@@ -178,12 +179,13 @@ async def main_async(args: argparse.Namespace) -> int:
         if not isinstance(entries, list):
             dropped["unparsed"] += 1
             continue
-        for offset, entry in enumerate(entries):
+        for entry in entries:
             if not isinstance(entry, dict):
                 dropped["unparsed"] += 1
                 continue
+            serial += 1
             case = build_positive(chunk, str(entry.get("question", "")),
-                                  str(entry.get("answer_quote", "")), index * 10 + offset)
+                                  str(entry.get("answer_quote", "")), serial)
             if case is None:
                 dropped["unquoted"] += 1
                 continue
@@ -210,6 +212,11 @@ async def main_async(args: argparse.Namespace) -> int:
     unique = []
     for case in drafted:
         if case.id in seen:
+            # Ids are generated from a single counter, so this means two chunks
+            # in the same document produced the same slug and number. Say so
+            # rather than dropping a record silently.
+            print(f"  dropped duplicate id {case.id!r}")
+            dropped["unparsed"] += 1
             continue
         seen.add(case.id)
         unique.append(case)

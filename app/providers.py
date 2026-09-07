@@ -116,12 +116,23 @@ def build_prompt(question: str, chunks: list[dict[str, Any]], system_prompt: str
 
 
 def local_answer(question: str, chunks: list[dict[str, Any]], language: str) -> str:
+    """Quote the sentence in each source that answers the question.
+
+    This used to take the first sentence over 35 characters, which never read
+    the question at all: two different questions answered from the same chunk
+    got the same sentence back. It went unnoticed while chunks were small
+    windows and one chunk held roughly one fact. Now that a chunk is a whole
+    section, or several, the sentence has to be chosen.
+    """
+    from .retrieval import best_evidence
+
     if not chunks:
         return "سند مرتبطی پیدا نشد. لطفاً منبع مناسب اضافه کنید." if language == "fa" else "No relevant source was found. Please add a suitable document."
     excerpts = []
     for i, chunk in enumerate(chunks[:3], 1):
-        sentences = re.split(r"(?<=[.!?؟])\s+|\n+", chunk["content"])
-        excerpt = next((s.strip() for s in sentences if len(s.strip()) > 35), chunk["content"][:320]).strip()
+        excerpt = best_evidence(question, chunk["content"]).strip()
+        if not excerpt:
+            excerpt = chunk["content"][:320].strip()
         excerpts.append(f"{excerpt} [{i}]")
     prefix = "بر اساس منابع بازیابی‌شده:" if language == "fa" else "Based on the retrieved sources:"
     return prefix + "\n\n" + "\n\n".join(excerpts)
