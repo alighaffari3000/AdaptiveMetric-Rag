@@ -195,7 +195,13 @@ def best_evidence(query: str, content: str, answer: str = "",
     heading, sentences = max(groups, key=group_score)
     if not sentences:
         return heading[:600]
-    return max(sentences, key=sentence_score)[:600]
+    chosen = max(sentences, key=sentence_score)
+    if sentence_score(chosen)[0] == 0:
+        # Nothing in this section matches a word of the question, so the tie
+        # break on brevity is picking arbitrarily. The longest line at least
+        # carries the most of what the section says.
+        chosen = max(sentences, key=len)
+    return chosen[:600]
 
 
 def embed(text: str) -> list[float]:

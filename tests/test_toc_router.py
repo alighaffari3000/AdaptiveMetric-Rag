@@ -410,3 +410,17 @@ def test_the_section_limit_holds_even_when_one_reply_resolves_to_several():
     rows = [{"document_name": f"{name}.md", "sections": ["Guide > Leave"]}
             for name in ("a", "b", "c", "d")]
     assert len(constrain(["Leave"], toc_from_rows(rows), 2)) == 2
+
+
+def test_one_ambiguous_reply_does_not_crowd_out_a_precise_one():
+    """A bare title naming a section in four documents used to spend the whole
+    limit, discarding the qualified proposal that followed it."""
+    rows = [{"document_name": f"{name}.md", "sections": ["Guide > Definitions"]}
+            for name in ("a", "b", "c", "d")]
+    rows.append({"document_name": "e.md", "sections": ["Guide > Leave cap"]})
+    toc = toc_from_rows(rows)
+
+    kept = constrain(["Definitions", "e.md > Guide > Leave cap"], toc, 3)
+    assert len(kept) == 3
+    assert any(entry["path"] == "Guide > Leave cap" for entry in kept), \
+        "the precise proposal must survive the ambiguous one"

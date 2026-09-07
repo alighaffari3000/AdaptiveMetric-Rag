@@ -24,6 +24,7 @@ from .net import ProviderError, redact
 from .models import AppSettings, ChatRequest, ChatResponse, Citation, SettingsView
 from .providers import generate, local_answer
 from .retrieval import best_evidence
+from .structure import sections_of
 from .search import search
 
 
@@ -54,10 +55,13 @@ def refresh_saved_citation_highlights() -> None:
             continue
         changed = False
         for citation in citations:
-            chunk = database.row("SELECT content FROM chunks WHERE id=?", (citation.get("chunk_id", ""),))
+            chunk = database.row("SELECT content,section_path,metadata FROM chunks WHERE id=?",
+                                 (citation.get("chunk_id", ""),))
             if chunk:
                 claim = claim_for_citation(message["content"], int(citation.get("id", 0)))
-                citation["highlight"] = best_evidence(question, chunk["content"], claim)
+                citation["highlight"] = best_evidence(
+                    question, chunk["content"], claim,
+                    sections=sections_of(chunk.get("metadata"), chunk.get("section_path")))
                 changed = True
         if changed:
             database.execute("UPDATE messages SET citations=? WHERE id=?", (database.json_value(citations), message["id"]))

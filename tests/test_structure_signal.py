@@ -275,3 +275,12 @@ def test_an_unknown_section_list_falls_back_to_reading_the_text():
 
     content = "## مرخصی استعلاجی\nحداکثر هشت روز در سال است.\n## پاداش\nدو ماه حقوق پایه.\n"
     assert "هشت روز" in best_evidence("سقف مرخصی استعلاجی چند روز است؟", content)
+
+
+def test_when_nothing_matches_the_fullest_line_is_quoted():
+    """Ties on zero were broken by brevity, which picked a bare label."""
+    from app.retrieval import best_evidence
+
+    content = "Leave policy\nDetails\nEmployees may take up to eight days.\n"
+    assert best_evidence("leave policy", content, sections=["Leave policy"]) == \
+        "Employees may take up to eight days."

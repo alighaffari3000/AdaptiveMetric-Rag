@@ -55,33 +55,21 @@ def extract(filename: str, payload: bytes) -> list[tuple[str, int | None, str | 
         doc = DocxDocument(io.BytesIO(payload))
         blocks: list[tuple[str, int | None, str | None]] = []
         stack: list[tuple[int, str]] = []
-        opening: list[str] = []
         for paragraph in doc.paragraphs:
             text = paragraph.text.strip()
             if not text:
                 continue
             level = _docx_heading_level(paragraph)
             if level is not None:
-                # A heading is also the first line of its own section. Every
-                # other format keeps it in the text, and without it a term that
-                # appears only in a heading is missing from the BM25 postings
-                # for Word documents alone. It waits for the section's first
-                # paragraph rather than becoming a block of its own, which would
-                # leave a chunk holding a heading and nothing else. Consecutive
-                # headings - a title above a chapter above a clause - all wait
-                # together, so none of them is ever stranded.
                 stack = [(lv, t) for lv, t in stack if lv < level] + [(level, text)]
-                opening.append(text)
-                continue
-            if opening:
-                opening.append(text)
-                blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
-                opening = []
-                continue
+            # A heading is also the first line of its own section, under its own
+            # path. Every other format keeps it in the text, and without it a
+            # term that appears only in a heading is missing from the BM25
+            # postings for Word documents alone. Packing joins it to the body
+            # below; not stranding it is `chunk_blocks`' job, for every format.
             blocks.append((text, None, structure.join_path(stack) or None))
-        if opening:
-            blocks.append(("\n".join(opening), None, structure.join_path(stack) or None))
         return blocks
+
     text = payload.decode("utf-8", errors="replace")
     if suffix in {".html", ".htm"}:
         return [(body, page, path or None) for body, page, path in structure.detect_html(text)]
@@ -153,8 +141,16 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
         if not clean:
             continue
         if len(clean) > size:
-            # A section too long to pack: emit what is pending, then window it.
-            flush()
+            # A section too long to pack. Whatever is pending joins its first
+            # window instead of being emitted alone: a heading, or a short
+            # section, left to stand by itself becomes a chunk with no answer
+            # in it that still competes in retrieval.
+            carried = [text for text, _, _ in pending]
+            covered = [section] if section else []
+            covered = list(dict.fromkeys([s for _, _, s in pending if s] + covered))
+            pending.clear()
+            if carried:
+                clean = "\n".join(carried + [clean])
             start = 0
             while start < len(clean):
                 end = min(len(clean), start + size)
@@ -165,10 +161,13 @@ def chunk_blocks(blocks: list[tuple[str, int | None, str | None]], size: int, ov
                         end = boundary + 1
                 piece = clean[start:end].strip()
                 if piece:
-                    leaf = section.split(structure.PATH_SEPARATOR)[-1] if section else None
+                    # Only the first window inherits the sections carried into
+                    # it; the rest are continuations of this section alone.
+                    here = covered if start == 0 else ([section] if section else [])
+                    leaf = (here[0].split(structure.PATH_SEPARATOR)[-1] if here else None)
                     chunks.append({"content": piece, "page": page, "section": leaf,
-                                   "section_path": section or "",
-                                   "sections": [section] if section else []})
+                                   "section_path": structure.merge_section_paths(here),
+                                   "sections": here})
                 if end >= len(clean):
                     break
                 start = max(start + 1, end - overlap)

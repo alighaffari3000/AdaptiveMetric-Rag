@@ -62,23 +62,23 @@ _DOTTED = re.compile(rf"^({_NUM}+(?:\.{_NUM}+)*)\.?\s+\S.*$")
 
 # A title follows its numbering after a separator; a sentence just continues.
 _TITLE_SEPARATOR = re.compile(r"^[-—–:.،]")
-MAX_TITLE_WORDS_WITHOUT_SEPARATOR = 4
 
 
 def _titleish_tail(tail: str) -> bool:
     """Whether what follows a numbering reads as a title rather than a clause.
 
-    Nothing at all ("تبصره ۱"), or a separator ("ماده ۱۲:", "Section 1. Network
-    summary", "فصل اول — کلیات"), or a short label with no separator
-    ("ماده ۱ طرفین قرارداد"). A sentence that merely opens with the keyword
-    ("ماده ۵ حقوق را تعیین می‌کند.") does none of these.
+    Nothing at all ("تبصره ۱"), a separator ("ماده ۱۲:", "Section 1. Network
+    summary", "فصل اول — کلیات"), or a label that does not close like a
+    sentence ("Chapter 3 Network security and incident response"). A clause
+    that merely opens with the keyword ("ماده ۵ حقوق را تعیین می‌کند.") ends
+    in a full stop, and a long one is already rejected by the word count in
+    `_looks_like_prose`. Capping the tail's own length instead threw away
+    genuine headings that name what a chapter is about.
     """
     tail = tail.strip()
-    if not tail:
+    if not tail or _TITLE_SEPARATOR.match(tail):
         return True
-    if _TITLE_SEPARATOR.match(tail):
-        return True
-    return len(tail.split()) <= MAX_TITLE_WORDS_WITHOUT_SEPARATOR and not tail.endswith(".")
+    return not tail.endswith(".")
 
 
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
@@ -367,6 +367,27 @@ def merge_section_paths(paths: list[str]) -> str:
     return f"{PATH_SEPARATOR.join(prefix)}{PATH_SEPARATOR}{joined}" if prefix else joined
 
 
+def sections_of(metadata: Any, section_path: Any) -> list[str]:
+    """The sections a stored chunk covers, from its metadata.
+
+    The display path names them but cannot be parsed back, so the list is what
+    is stored. A row written before the list existed falls back to its path.
+    """
+    import json
+
+    if isinstance(metadata, str) and metadata:
+        try:
+            parsed = json.loads(metadata)
+        except json.JSONDecodeError:
+            parsed = {}
+        sections = parsed.get("sections") if isinstance(parsed, dict) else None
+        if isinstance(sections, list):
+            found = [item for item in sections if isinstance(item, str) and item]
+            if found:
+                return found
+    return [section_path] if isinstance(section_path, str) and section_path else []
+
+
 def build_toc(section_lists: list[list[str]]) -> list[dict[str, Any]]:
     """A flat, ordered table of contents from the chunks' own section lists."""
     toc: list[dict[str, Any]] = []
@@ -393,18 +414,25 @@ def looks_like_heading(line: str, unambiguous: bool = False) -> bool:
     false positive only adds a section boundary; when splitting a chunk to
     quote from it, a false positive makes that line unquotable, so the reader
     would never be shown the sentence that answers.
+
+    Everything else defers to `_pattern_level`, which is the single place the
+    rule lives. Restating it here is how "Section 3 covers rollback." came back
+    as a heading after `_pattern_level` had learned to reject it.
     """
     stripped = line.strip()
     if not stripped:
         return False
     if _MARKDOWN_HEADING.match(stripped):
         return True
-    if _looks_like_prose(stripped):
+    level = _pattern_level(stripped)
+    if level is None:
         return False
-    patterns = _PERSIAN_PATTERNS + _ENGLISH_PATTERNS
-    if any(pattern.match(stripped) for _, pattern in patterns):
-        return True
-    return False if unambiguous else _pattern_level(stripped) is not None
+    return not (unambiguous and _DOTTED.match(stripped) and not _keyword_heading(stripped))
+
+
+def _keyword_heading(stripped: str) -> bool:
+    """Whether a line is numbered by a keyword rather than by digits alone."""
+    return any(pattern.match(stripped) for _, pattern in _PERSIAN_PATTERNS + _ENGLISH_PATTERNS)
 
 
 def detect(text: str, suffix: str) -> list[Heading]:

@@ -404,3 +404,70 @@ def test_consecutive_word_headings_never_strand_one_as_its_own_chunk():
     chunks = chunk_blocks(extract("policy.docx", buffer.getvalue()), 300, 40)
     assert "HR Policy" in chunks[0]["content"]
     assert "word" in chunks[0]["content"], "no chunk may hold headings and nothing else"
+
+
+@pytest.mark.parametrize("line", [
+    "Chapter 3 Network security and incident response",
+    "فصل سوم شرایط عمومی استخدام کارکنان دولت",
+    "ماده ۱۲ تعیین حقوق و مزایای کارکنان رسمی",
+])
+def test_a_heading_may_name_its_subject_at_length(line):
+    """Capping the tail's own length threw away headings that say what a
+    chapter is about. The whole-line word count is the only length rule."""
+    assert detect_plain(line + "\nbody\n"), f"{line!r} should read as a heading"
+
+
+@pytest.mark.parametrize("line", [
+    "Section 3 covers rollback and recovery.",
+    "ماده ۵ حقوق را تعیین می‌کند.",
+    "بند ۲ حقوق پایه افزایش می‌یابد.",
+])
+def test_both_heading_entry_points_agree_that_a_clause_is_prose(line):
+    """looks_like_heading restated the rule instead of deferring to it, so a
+    line detect_plain rejected was still split out as a heading when quoting."""
+    from app.structure import looks_like_heading
+
+    assert not detect_plain(line + "\n")
+    assert looks_like_heading(line) is False
+    assert looks_like_heading(line, unambiguous=True) is False
+
+
+def test_sibling_word_headings_each_keep_their_own_path():
+    """Merging them into the following section filed the first under the
+    second's name and lost it from the table of contents."""
+    import io as byte_io
+
+    from docx import Document
+
+    document = Document()
+    document.add_heading("Alpha", level=1)
+    document.add_heading("Beta", level=1)
+    document.add_paragraph("Body under beta.")
+    buffer = byte_io.BytesIO()
+    document.save(buffer)
+
+    chunk = chunk_blocks(extract("siblings.docx", buffer.getvalue()), 900, 100)[0]
+    assert chunk["sections"] == ["Alpha", "Beta"]
+
+
+def test_a_short_block_before_an_oversized_one_is_carried_into_it():
+    """Stranding is a size question, so it is handled once for every format
+    rather than per reader: a lone heading is a chunk with no answer in it."""
+    blocks = [("Chapter one", None, "Chapter one"), ("word " * 200, None, "Chapter one > Detail")]
+    chunks = chunk_blocks(blocks, 300, 40)
+    assert "Chapter one" in chunks[0]["content"]
+    assert "word" in chunks[0]["content"], "the heading must not be a chunk of its own"
+    assert chunks[0]["sections"] == ["Chapter one", "Chapter one > Detail"]
+    # Later windows are continuations of the long section alone.
+    assert chunks[1]["sections"] == ["Chapter one > Detail"]
+
+
+def test_sections_of_reads_the_list_and_falls_back_to_the_path():
+    import json as json_module
+
+    from app.structure import sections_of
+
+    assert sections_of(json_module.dumps({"sections": ["A > B", "A > C"]}), "A > B | C") == ["A > B", "A > C"]
+    assert sections_of("{}", "A > B") == ["A > B"]
+    assert sections_of("not json", "A > B") == ["A > B"]
+    assert sections_of(None, None) == []

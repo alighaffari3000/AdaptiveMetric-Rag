@@ -129,8 +129,11 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
         for form in (label, entry["path"], entry["title"]):
             folded.setdefault(normalize_heading(form), []).append(entry)
 
-    kept: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    # Resolutions are collected per proposal and then interleaved. Taking them
+    # in order let one ambiguous reply - a bare title that names a section in
+    # four documents - spend the whole limit and drop the precise proposals
+    # after it.
+    resolutions: list[list[dict[str, Any]]] = []
     for candidate in proposed:
         resolved = exact.get(candidate) or folded.get(normalize_heading(candidate))
         if resolved is None:
@@ -144,14 +147,23 @@ def constrain(proposed: list[str], toc: list[dict[str, Any]], limit: int) -> lis
         if not resolved:
             logger.info("router proposed a section that is not in the table of contents: %r", candidate)
             continue
-        for entry in resolved:
+        resolutions.append(list(resolved))
+
+    kept: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for rank in range(max((len(group) for group in resolutions), default=0)):
+        for group in resolutions:
+            if rank >= len(group):
+                continue
+            entry = group[rank]
             identity = (entry.get("document_name", ""), entry["path"])
-            if identity not in seen:
-                seen.add(identity)
-                kept.append(entry)
-        if len(kept) >= limit:
-            break
-    return kept[:limit]
+            if identity in seen:
+                continue
+            seen.add(identity)
+            kept.append(entry)
+            if len(kept) >= limit:
+                return kept
+    return kept
 
 
 def toc_from_rows(rows: list[dict[str, Any]], positions: list[int] | None = None) -> list[dict[str, Any]]:

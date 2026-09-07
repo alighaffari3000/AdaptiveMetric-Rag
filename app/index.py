@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from . import database
+from .structure import sections_of
 
 logger = logging.getLogger("adaptive_metric_rag.index")
 
@@ -163,19 +164,6 @@ def _empty_snapshot() -> Snapshot:
     )
 
 
-def _sections(metadata: Any, section_path: Any) -> list[str]:
-    """The chunk's covered sections, falling back to its path for older rows."""
-    if isinstance(metadata, str) and metadata:
-        try:
-            parsed = json.loads(metadata)
-        except json.JSONDecodeError:
-            parsed = {}
-        sections = parsed.get("sections") if isinstance(parsed, dict) else None
-        if isinstance(sections, list):
-            return [item for item in sections if isinstance(item, str) and item]
-    return [section_path] if isinstance(section_path, str) and section_path else []
-
-
 def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
     if not raw_rows:
         return _empty_snapshot()
@@ -207,7 +195,7 @@ def _build(raw_rows: list[dict[str, Any]]) -> Snapshot:
         row["tokens"] = tokens
         # The display path names the sections a packed chunk covers but cannot
         # be parsed back into them, so the list travels as data.
-        row["sections"] = _sections(raw.get("metadata"), raw.get("section_path"))
+        row["sections"] = sections_of(raw.get("metadata"), raw.get("section_path"))
         rows.append(row)
 
     postings = {
