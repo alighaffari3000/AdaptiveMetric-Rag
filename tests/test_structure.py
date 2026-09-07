@@ -409,12 +409,28 @@ def test_consecutive_word_headings_never_strand_one_as_its_own_chunk():
 @pytest.mark.parametrize("line", [
     "Chapter 3 Network security and incident response",
     "فصل سوم شرایط عمومی استخدام کارکنان دولت",
-    "ماده ۱۲ تعیین حقوق و مزایای کارکنان رسمی",
 ])
-def test_a_heading_may_name_its_subject_at_length(line):
-    """Capping the tail's own length threw away headings that say what a
-    chapter is about. The whole-line word count is the only length rule."""
+def test_an_unpunctuated_heading_may_still_name_its_subject(line):
     assert detect_plain(line + "\nbody\n"), f"{line!r} should read as a heading"
+
+
+@pytest.mark.parametrize("line", [
+    "ماده ۱۲ تعیین حقوق و مزایای کارکنان رسمی",
+    "Chapter 7 Terms governing the supply of professional services",
+])
+def test_a_long_heading_without_punctuation_is_deliberately_given_up(line):
+    """No length separates these from prose that opens with the same keyword.
+
+    "Chapter 4 was written by the finance team" has a six-word tail too, and
+    reading it as a heading fabricates a section path — which this module
+    treats as worse than having none. So the cut falls on the conservative
+    side, and a document that punctuates its headings keeps them at any length.
+    """
+    assert not detect_plain(line + "\nbody\n")
+    keyword, number, *rest = line.split()
+    for separator in ("—", ":"):
+        punctuated = f"{keyword} {number} {separator} {' '.join(rest)}"
+        assert detect_plain(punctuated + "\nbody\n"), f"{punctuated!r} should be a heading"
 
 
 @pytest.mark.parametrize("line", [
@@ -471,3 +487,61 @@ def test_sections_of_reads_the_list_and_falls_back_to_the_path():
     assert sections_of("{}", "A > B") == ["A > B"]
     assert sections_of("not json", "A > B") == ["A > B"]
     assert sections_of(None, None) == []
+
+
+def test_a_heading_never_ends_a_chunk_it_does_not_belong_to():
+    """A chunk closing on a heading leaves that section's text in the next
+    chunk without the words a reader would search for."""
+    blocks = [("Alpha", None, "Alpha"), ("Alpha body. " * 18, None, "Alpha"),
+              ("Sick leave", None, "Sick leave"),
+              ("Up to eight days per year with a certificate.", None, "Sick leave")]
+    chunks = chunk_blocks(blocks, 300, 40)
+    for chunk in chunks:
+        assert not chunk["content"].strip().endswith("Sick leave"), \
+            "the heading must open the next chunk, not close this one"
+    holder = next(c for c in chunks if "eight days" in c["content"])
+    assert "Sick leave" in holder["content"]
+
+
+def test_a_document_ending_on_a_heading_does_not_leave_it_alone():
+    blocks = [("Alpha", None, "Alpha"), ("word " * 80, None, "Alpha"),
+              ("Beta heading", None, "Beta heading")]
+    chunks = chunk_blocks(blocks, 300, 40)
+    assert chunks[-1]["content"].strip() != "Beta heading"
+    assert "Beta heading" in chunks[-1]["content"]
+    assert "Beta heading" in chunks[-1]["sections"]
+
+
+def test_carried_text_keeps_its_own_page_and_declares_only_what_it_holds():
+    """A window made entirely of carried text must not claim the long section,
+    and must not be stamped with that section's page."""
+    chunks = chunk_blocks([("X " * 145, 1, "Intro"), ("L " * 400, 2, "Long")], 300, 40)
+    assert chunks[0]["page"] == 1
+    assert chunks[0]["sections"] == ["Intro"]
+    assert all(chunk["page"] == 2 for chunk in chunks[1:])
+    assert all(chunk["sections"] == ["Long"] for chunk in chunks[1:])
+
+
+def test_a_heading_carried_into_a_long_section_keeps_the_heading_s_page():
+    chunks = chunk_blocks([("Chapter one", 1, "Chapter one"),
+                           ("word " * 200, 2, "Chapter one > Detail")], 300, 40)
+    assert chunks[0]["page"] == 1
+    assert chunks[0]["sections"] == ["Chapter one", "Chapter one > Detail"]
+    assert chunks[1]["page"] == 2
+    assert chunks[1]["sections"] == ["Chapter one > Detail"]
+
+
+@pytest.mark.parametrize("line", [
+    "Chapter 7 — Terms governing the supply of professional services",
+    "فصل سوم — شرایط عمومی استخدام کارکنان دولت و نهادهای وابسته",
+    "ماده ۱۲: تعیین حقوق و مزایای کارکنان رسمی و پیمانی",
+])
+def test_a_punctuated_heading_may_be_as_long_as_it_needs(line):
+    """The word count guards the bare dotted-number rule, which has no
+    punctuation to read; a heading that separates its title does."""
+    assert detect_plain(line + "\nbody\n"), f"{line!r} should read as a heading"
+
+
+def test_the_word_count_still_guards_the_dotted_number_rule():
+    assert not detect_plain("3.5 percent of the fleet was replaced during the year\n")
+    assert detect_plain("4.2.1 Rollback procedure\n")

@@ -62,23 +62,42 @@ _DOTTED = re.compile(rf"^({_NUM}+(?:\.{_NUM}+)*)\.?\s+\S.*$")
 
 # A title follows its numbering after a separator; a sentence just continues.
 _TITLE_SEPARATOR = re.compile(r"^[-—–:.،]")
+# Without a separator, only a short label is taken as a title. No length
+# separates the two cases cleanly - "Chapter 3 Network security and incident
+# response" and "Chapter 4 was written by the finance team" have tails of five
+# and six words - so the cut is deliberately on the conservative side of the
+# ambiguity. Dropping it entirely was tried and turned five-to-nine word
+# sentences into headings, which fabricates a section path; this module's rule
+# is that a wrong path is worse than none. Documents that punctuate their
+# headings at all are unaffected at any length.
+MAX_TITLE_WORDS_WITHOUT_SEPARATOR = 5
 
 
 def _titleish_tail(tail: str) -> bool:
     """Whether what follows a numbering reads as a title rather than a clause.
 
     Nothing at all ("تبصره ۱"), a separator ("ماده ۱۲:", "Section 1. Network
-    summary", "فصل اول — کلیات"), or a label that does not close like a
-    sentence ("Chapter 3 Network security and incident response"). A clause
-    that merely opens with the keyword ("ماده ۵ حقوق را تعیین می‌کند.") ends
-    in a full stop, and a long one is already rejected by the word count in
-    `_looks_like_prose`. Capping the tail's own length instead threw away
-    genuine headings that name what a chapter is about.
+    summary", "فصل اول — کلیات"), or a short label that does not close like a
+    sentence ("ماده ۱ طرفین قرارداد").
     """
     tail = tail.strip()
     if not tail or _TITLE_SEPARATOR.match(tail):
         return True
-    return not tail.endswith(".")
+    return len(tail.split()) <= MAX_TITLE_WORDS_WITHOUT_SEPARATOR and not tail.endswith(".")
+
+
+def heading_only(text: str, section_path: str | None) -> bool:
+    """Whether a block is a heading with no text of its own under it.
+
+    Such a block belongs with the section it opens, never on the end of the one
+    before it, and never alone: a chunk holding a heading and nothing else has
+    no answer in it and still competes in retrieval.
+    """
+    line = text.strip()
+    if not line or "\n" in line:
+        return False
+    leaf = (section_path or "").split(PATH_SEPARATOR)[-1].strip()
+    return bool(leaf) and _clean_title(line) == leaf
 
 
 _MARKDOWN_HEADING = re.compile(r"^(#{1,6})\s+(\S.*?)\s*#*\s*$")
@@ -102,10 +121,9 @@ def _clean_title(text: str) -> str:
     return re.sub(r"\s*[-—–:]\s*$", "", title).strip()
 
 
-# A heading is a label, not a sentence. Every heading in the evaluation corpus
-# is five words or fewer; the prose that was being mistaken for one - "بند اول
-# این است که همه کارکنان باید حضور داشته باشند", "Section 3 of the report was
-# written by the finance team" - runs to ten or more.
+# The bare dotted-number rule has no punctuation to read, so length is all it
+# has: "3.5 percent of the fleet was replaced during the year" is prose and
+# "4.2.1 Rollback procedure" is not.
 MAX_HEADING_WORDS = 9
 # Not "." or ":": "Section 4." and "ماده ۱۲:" are ordinary heading forms, and
 # `_clean_title` already strips a trailing colon. Prose that opens with a
@@ -114,11 +132,16 @@ _SENTENCE_END = ("،", ",", "؛", ";", "؟", "?", "!", "۔")
 
 
 def _looks_like_prose(line: str) -> bool:
-    """Reject a numbered line that is really a sentence or a list item."""
+    """Reject a numbered line that is really a sentence or a list item.
+
+    The word count is not applied here: a heading that punctuates its title
+    ("فصل سوم — شرایط عمومی استخدام کارکنان دولت و نهادهای وابسته") is as long
+    as it needs to be, and `_titleish_tail` already refuses an unpunctuated one
+    that runs on. The count still guards the bare dotted-number rule, which has
+    no punctuation to read.
+    """
     stripped = line.strip()
     if not stripped or len(stripped) > MAX_HEADING_LENGTH:
-        return True
-    if len(stripped.split()) > MAX_HEADING_WORDS:
         return True
     # A heading does not close like a sentence.
     return stripped.endswith(_SENTENCE_END)
@@ -133,7 +156,7 @@ def _pattern_level(line: str) -> int | None:
         if match and _titleish_tail(stripped[match.end():]):
             return level
     dotted = _DOTTED.match(stripped)
-    if dotted:
+    if dotted and len(stripped.split()) <= MAX_HEADING_WORDS:
         components = dotted.group(1).count(".") + 1
         # A bare "1 Introduction" is too weak a signal on its own; require at
         # least one dot, so prose starting with a year or a quantity is safe.
